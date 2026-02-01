@@ -1,0 +1,462 @@
+[
+  {
+    "name": "M1",
+    "description": "CRAB NEBULA (SNR in Taurus)",
+    "vaonis_filter": "Dualband"
+  },
+  {
+    "name": "M8",
+    "description": "LAGOON NEBULA (diffuse Nebula in Sagittarius)",
+    "vaonis_filter": "Dualband"
+  },
+  {
+    "name": "M16",
+    "description": "EAGLE NEBULA (diffuse nebula in Serpens)",
+    "vaonis_filter": "Dualband"
+  },
+  {
+    "name": "M17",
+    "description": "SWAN (OMEGA) NEBULA (diffuse nebula in Sagittarius)",
+    "vaonis_filter": "Dualband"
+  },
+  {
+    "name": "M20",
+    "description": "TRIFID NEBULA (diffuse emission/reflection nebula in Sagittarius)",
+    "vaonis_filter": "Dualband"
+  },
+  {
+    "name": "M27",
+    "description": "DUMBELL NEBULA (planetary nebula in Vulpecula)",
+    "vaonis_filter": "Dualband"
+  },
+  {
+    "name": "M42",
+    "description": "GREAT ORION NEBULA (diffuse nebula)",
+    "vaonis_filter": "Dualband"
+  },
+  {
+    "name": "M43",
+    "description": "(north part of Great Orion Nebula)",
+    "vaonis_filter": "Dualband"
+  },
+  {
+    "name": "M57",
+    "description": "RING NEBULA (planetary nebula in Lyra)",
+    "vaonis_filter": "Dualband"
+  },
+  {
+    "name": "M76",
+    "description": "“MINI-DUMBELL” or BUTTERFLY NEBULA (planetary nebula in Perseus)",
+    "vaonis_filter": "Dualband"
+  },
+  {
+    "name": "M97",
+    "description": "“OWL NEBULA” (planetary nebula in Ursa Major)",
+    "vaonis_filter": "Dualband"
+  },
+  {
+    "name": "NGC 40",
+    "description": "(Planetary Nebula in Cepheus)",
+    "vaonis_filter": "Dualband"
+  },
+  {
+    "name": "NGC 246",
+    "description": "(Planetary in Cetus)",
+    "vaonis_filter": "Dualband"
+  },
+  {
+    "name": "NGC 281",
+    "description": "(Diffuse emission nebula Dualband",
+    "vaonis_filter": "Dualband"
+  },
+  {
+    "name": "NGC 604",
+    "description": "(HII region in galaxy M33 in Triangulum)",
+    "vaonis_filter": "Dualband"
+  },
+  {
+    "name": "NGC 896/IC 1795",
+    "description": "(“Heart” nebula in Cassiopeia)",
+    "vaonis_filter": "Dualband"
+  },
+  {
+    "name": "NGC 1360",
+    "description": "(large Planetary Nebula in Fornax)",
+    "vaonis_filter": "Dualband"
+  },
+  {
+    "name": "NGC 1491",
+    "description": "(diffuse Nebula in Perseus)",
+    "vaonis_filter": "Dualband"
+  },
+  {
+    "name": "NGC 1499",
+    "description": "CALIFORNIA NEBULA (diffuse Nebula in Perseus)",
+    "vaonis_filter": "Dualband"
+  },
+  {
+    "name": "NGC 1514",
+    "description": "“CRYSTAL-BALL NEBULA” (planetary nebula in Taurus)",
+    "vaonis_filter": "Dualband"
+  },
+  {
+    "name": "NGC 2022",
+    "description": "(planetary nebula in Orion)",
+    "vaonis_filter": "Dualband"
+  },
+  {
+    "name": "NGC 2024",
+    "description": "“FLAME NEBULA” (diffuse emission/reflection nebula in Orion)",
+    "vaonis_filter": "Dualband"
+  },
+  {
+    "name": "NGC 2174",
+    "description": "(diffuse nebula in northern Orion)",
+    "vaonis_filter": "Dualband"
+  },
+  {
+    "name": "NGC 2327",
+    "description": "(diffuse nebula in Monoceros)",
+    "vaonis_filter": "Dualband"
+  },
+  {
+    "name": "NGC 2237-9",
+    "description": "“ROSETTE NEBULA” (diffuse nebula in Monoceros).",
+    "vaonis_filter": "Dualband"
+  },
+  {
+    "name": "NGC 2264",
+    "description": "“CONE NEBULA” near S Monocerotis",
+    "vaonis_filter": "Dualband"
+  },
+  {
+    "name": "NGC 2359",
+    "description": "THOR’S HELMET (diffuse nebula in Canis Major)",
+    "vaonis_filter": "Dualband"
+  },
+  {
+    "name": "NGC 2346",
+    "description": "(Planetary nebula in Monoceros)",
+    "vaonis_filter": "Dualband"
+  },
+  {
+    "name": "NGC 2438",
+    "description": "(planetary nebula in Puppis)",
+    "vaonis_filter": "Dualband"
+  },
+  {
+    "name": "NGC 2371-2",
+    "description": "(planetary nebula in Gemini)",
+    "vaonis_filter": "Dualband"
+  },
+  {
+    "name": "NGC 2392",
+    "description": "“ESKIMO NEBULA” (planetary nebula in Gemini)",
+    "vaonis_filter": "Dualband"
+  },
+  {
+    "name": "NGC 2440",
+    "description": "(planetary nebula in Puppis)",
+    "vaonis_filter": "Dualband"
+  },
+  {
+    "name": "NGC 3242",
+    "description": "“GHOST OF JUPITER” (planetary in Hydra)",
+    "vaonis_filter": "Dualband"
+  },
+  {
+    "name": "NGC 4361",
+    "description": "(planetary nebula in Corvus)",
+    "vaonis_filter": "Dualband"
+  },
+  {
+    "name": "NGC 6210",
+    "description": "(planetary nebula in Hercules)",
+    "vaonis_filter": "Dualband"
+  },
+  {
+    "name": "NGC 6302",
+    "description": "“BUG NEBULA” (planetary nebula in Scorpius)",
+    "vaonis_filter": "Dualband"
+  },
+  {
+    "name": "NGC 6334",
+    "description": "(diffuse nebula in Scorpius)",
+    "vaonis_filter": "Dualband"
+  },
+  {
+    "name": "NGC 6445",
+    "description": "(Planetary Nebula in Sagittarius)",
+    "vaonis_filter": "Dualband"
+  },
+  {
+    "name": "NGC 6357",
+    "description": "(diffuse nebula in Scorpius)",
+    "vaonis_filter": "Dualband"
+  },
+  {
+    "name": "NGC 6543",
+    "description": "“CAT’S EYE” (planetary nebula in Draco)",
+    "vaonis_filter": "Dualband"
+  },
+  {
+    "name": "NGC 6559",
+    "description": "(diffuse nebula in Sagittarius)",
+    "vaonis_filter": "Dualband"
+  },
+  {
+    "name": "NGC 6781",
+    "description": "(planetary in Aquila)",
+    "vaonis_filter": "Dualband"
+  },
+  {
+    "name": "NGC 6804",
+    "description": "(Planetary nebula in Aquila)",
+    "vaonis_filter": "Dualband"
+  },
+  {
+    "name": "NGC 6888",
+    "description": "(diffuse nebula in Cygnus)",
+    "vaonis_filter": "Dualband"
+  },
+  {
+    "name": "NGC 6905",
+    "description": "“the Blue Flash” planetary Nebula in Delphinus)",
+    "vaonis_filter": "Dualband"
+  },
+  {
+    "name": "NGC 6960-95",
+    "description": "(SNR in Cygnus)",
+    "vaonis_filter": "Dualband"
+  },
+  {
+    "name": "NGC 7000",
+    "description": "(diffuse nebula in Cygnus)",
+    "vaonis_filter": "Dualband"
+  },
+  {
+    "name": "NGC 7008",
+    "description": "(planetary nebula in Cygnus)",
+    "vaonis_filter": "Dualband"
+  },
+  {
+    "name": "NGC 7009",
+    "description": "SATURN NEBULA (planetary nebula in Aquarius)",
+    "vaonis_filter": "Dualband"
+  },
+  {
+    "name": "NGC 7026",
+    "description": "(Planetary nebula in Cygnus)",
+    "vaonis_filter": "Dualband"
+  },
+  {
+    "name": "NGC 7027",
+    "description": "(Planetary nebula in Cygnus)",
+    "vaonis_filter": "Dualband"
+  },
+  {
+    "name": "NGC 7048",
+    "description": "(Planetary nebula in Cygnus)",
+    "vaonis_filter": "Dualband"
+  },
+  {
+    "name": "NGC 7129-33",
+    "description": "(Diffuse Emission/reflection Nebula in Cepheus)",
+    "vaonis_filter": "Dualband"
+  },
+  {
+    "name": "NGC 7139",
+    "description": "(faint planetary nebula in Cepheus)",
+    "vaonis_filter": "Dualband"
+  },
+  {
+    "name": "NGC 7293",
+    "description": "GIANT HELICAL NEBULA (planetary nebula in Aquarius)",
+    "vaonis_filter": "Dualband"
+  },
+  {
+    "name": "NGC 7538",
+    "description": "(Diffuse nebula in Cepheus)",
+    "vaonis_filter": "Dualband"
+  },
+  {
+    "name": "NGC 7635",
+    "description": "(diffuse nebula in Cassiopeia)",
+    "vaonis_filter": "Dualband"
+  },
+  {
+    "name": "NGC 7662",
+    "description": "BLUE SNOWBALL (planetary nebula in Andromeda)",
+    "vaonis_filter": "Dualband"
+  },
+  {
+    "name": "NGC 7822",
+    "description": "(faint diffuse nebula in Cepheus)",
+    "vaonis_filter": "Dualband"
+  },
+  {
+    "name": "IC 405",
+    "description": "FLAMING STAR NEBULA (diffuse emission/reflection nebula in Auriga)",
+    "vaonis_filter": "Dualband"
+  },
+  {
+    "name": "IC 410",
+    "description": "(Nebula assoc. with NGC 1893 in Auriga)",
+    "vaonis_filter": "Dualband"
+  },
+  {
+    "name": "IC 417",
+    "description": "(diffuse Nebula in Auriga)",
+    "vaonis_filter": "Dualband"
+  },
+  {
+    "name": "IC 434",
+    "description": "HORSEHEAD NEBULA (diffuse nebula in Orion)",
+    "vaonis_filter": "Dualband"
+  },
+  {
+    "name": "IC 443",
+    "description": "(supernova remnant in Gemini)",
+    "vaonis_filter": "Dualband"
+  },
+  {
+    "name": "IC 1283",
+    "description": "(diffuse nebula in Sagittarius)",
+    "vaonis_filter": "Dualband"
+  },
+  {
+    "name": "IC 1318",
+    "description": "GAMMA CYGNI NEBULA (diffuse nebula in Cygnus)",
+    "vaonis_filter": "Dualband"
+  },
+  {
+    "name": "IC 1396",
+    "description": "(nebula S.W. of Mu Cephei)",
+    "vaonis_filter": "Dualband"
+  },
+  {
+    "name": "IC 1848",
+    "description": "(“The Baby Nebula”",
+    "vaonis_filter": "Dualband"
+  },
+  {
+    "name": "IC 2177",
+    "description": "(“Seagull Nebula” diffuse Nebula",
+    "vaonis_filter": "Dualband"
+  },
+  {
+    "name": "IC 4628",
+    "description": "(diffuse nebula in Scorpius)",
+    "vaonis_filter": "Dualband"
+  },
+  {
+    "name": "IC 5067-70",
+    "description": "PELICAN NEBULA (diffuse nebula in Cygnus)",
+    "vaonis_filter": "Dualband"
+  },
+  {
+    "name": "IC 5076",
+    "description": "(diffuse nebula inside cluster NGC 6991 in Cygnus)",
+    "vaonis_filter": "Dualband"
+  },
+  {
+    "name": "IC 5146",
+    "description": "THE COCCOON NEBULA (diffuse nebula in Cygnus)",
+    "vaonis_filter": "Dualband"
+  },
+  {
+    "name": "PK64+5.1",
+    "description": "“CAMPBELL’S HYDROGEN STAR” Cygnus (Henize 2-438, PNG 64.7+5.0)",
+    "vaonis_filter": "Dualband"
+  },
+  {
+    "name": "PK205+14.1",
+    "description": "“MEDUSA NEBULA” (large planetary nebula in Gemini)",
+    "vaonis_filter": "Dualband"
+  },
+  {
+    "name": "PK164+31.1",
+    "description": "“HEADPHONE NEBULA” (large planetary nebula in Lynx)",
+    "vaonis_filter": "Dualband"
+  },
+  {
+    "name": "Sh2-13",
+    "description": "(Diffuse nebula in Scorpius)",
+    "vaonis_filter": "Dualband"
+  },
+  {
+    "name": "Sh2-54",
+    "description": "(Diffuse nebula in Serpens)",
+    "vaonis_filter": "Dualband"
+  },
+  {
+    "name": "Sh2-84",
+    "description": "(Diffuse nebula in Sagitta)",
+    "vaonis_filter": "Dualband"
+  },
+  {
+    "name": "Sh2-101",
+    "description": "(Diffuse Nebula in Cygnus)",
+    "vaonis_filter": "Dualband"
+  },
+  {
+    "name": "Sh2-112",
+    "description": "(Diffuse Nebula in Cygnus N.W. of Deneb)",
+    "vaonis_filter": "Dualband"
+  },
+  {
+    "name": "Sh2-132",
+    "description": "(Diffuse Nebula in Cepheus)",
+    "vaonis_filter": "Dualband"
+  },
+  {
+    "name": "Sh2-142",
+    "description": "(Diffuse Nebula in Cepheus around open cluster NGC 7380)",
+    "vaonis_filter": "Dualband"
+  },
+  {
+    "name": "Sh2-157",
+    "description": "(“fingers” diffuse nebula in Cassiopeia)",
+    "vaonis_filter": "Dualband"
+  },
+  {
+    "name": "Sh2-170",
+    "description": "(faint diffuse nebula in Cepheus)",
+    "vaonis_filter": "Dualband"
+  },
+  {
+    "name": "Sh2-171",
+    "description": "(very faint large diffuse nebula in Cepheus)",
+    "vaonis_filter": "Dualband"
+  },
+  {
+    "name": "Sh2-235",
+    "description": "(diffuse nebula in Auriga)",
+    "vaonis_filter": "Dualband"
+  },
+  {
+    "name": "Sh2-261",
+    "description": "(diffuse nebula in Orion)",
+    "vaonis_filter": "Dualband"
+  },
+  {
+    "name": "Sh2-276",
+    "description": "“BARNARD’S LOOP” (diffuse nebula in Orion)",
+    "vaonis_filter": "Dualband"
+  },
+  {
+    "name": "Sh2-254-5-6-7-8",
+    "description": "(dim nebular complex in northern Orion: IC 2162)",
+    "vaonis_filter": "Dualband"
+  },
+  {
+    "name": "Sh2-311",
+    "description": "(nebulous open cluster NGC 2467 in Puppis)",
+    "vaonis_filter": "Dualband"
+  },
+  {
+    "name": "vdB93",
+    "description": "(Gum-1) (diffuse nebula in Monoceros near IC 2177)",
+    "vaonis_filter": "Dualband"
+  }
+]
