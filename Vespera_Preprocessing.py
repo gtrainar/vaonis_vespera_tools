@@ -313,9 +313,10 @@ QFrame#separator {
 # ----------------------------------------------------------------------
 class DiskUsageThread(QThread):
     """Background thread that logs disk free/total space every N seconds."""
-    def __init__(self, log_file: Path, interval_sec: int = 5, parent=None):
+    def __init__(self, log_file: Path, workdir: Path, interval_sec: int = 5, parent=None):
         super().__init__(parent)
         self.log_file = log_file
+        self.workdir = workdir
         self.interval_sec = interval_sec
         self._running = True
 
@@ -325,7 +326,8 @@ class DiskUsageThread(QThread):
                 try:
                     total, used, free = shutil.disk_usage(self.log_file.parent)
                     ts = datetime.now().isoformat()
-                    f.write(f"{ts},{free},{total}\n")
+                    dir_size = sum(f.stat().st_size for f in self.workdir.rglob("*") if f.is_file())
+                    f.write(f"{ts},{free},{total},{dir_size}\n")
                 except Exception as e:
                     f.write(f"{datetime.now().isoformat()},ERROR,{e}\n")
                 time.sleep(self.interval_sec)
@@ -562,7 +564,7 @@ class ProcessingThread(QThread):
 
         if self.folder_structure == 'native':
             self._log("Single dark → using directly as master", LogColor.BLUE)
-            self.siril.cmd("load", dark_file)
+            self.siril.cmd("load", f'"{dark_file}"')
             self.siril.cmd("save", "masters/dark_stacked")
         else:
             self.siril.cmd("cd", "darks")
@@ -926,7 +928,7 @@ class ProcessingThread(QThread):
         self.siril.cmd("save", f"../../{final_name}")
         self.siril.cmd("cd", "../..")
         self.siril.log(f"Final stacked image: {final_out}")
-        self.siril.cmd("load", final_name)
+        self.siril.cmd("load", f'"{final_name}"')
 
     # ------------------------------------------------------------------
     def _count_fits(self, folder: str) -> int:
@@ -1517,7 +1519,8 @@ class VesperaProGUI(QDialog):
                 f.write(header_line + "\n")
 
             # --- start disk‑usage thread ------------------------------------
-            self.disk_thread = DiskUsageThread(disk_log_file, interval_sec=5)
+            workdir_path = Path(self.siril.get_siril_wd())
+            self.disk_thread = DiskUsageThread(disk_log_file, workdir=workdir_path, interval_sec=5)
             self.disk_thread.start()
 
         except Exception as e:
