@@ -1,5 +1,5 @@
 ##############################################
-# AstroBackground Cleaner
+# AstroPhoto Processor
 #
 # (c) G. Trainar 2026
 # SPDX-License-Identifier: MIT License
@@ -8,7 +8,7 @@
 # Version 1.0.0
 
 """
-Astrophotography Background Cleaner Tool
+Astrophotography Processor Tool
 Turn a hazy sky into a clean canvas in a few clicks.
 
 This script uses wavelet decomposition and advanced filtering
@@ -40,11 +40,44 @@ from PyQt6.QtWidgets import (
     QProgressBar, QScrollArea
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer, QRect, QPoint
-from PyQt6.QtGui import QPixmap, QImage
+from PyQt6.QtGui import QPixmap, QImage, QPainter
 
 import cv2
 from skimage import color, filters
 from scipy import signal
+
+# ------------------------------------------------------------------
+# CUSTOM WIDGETS
+# ------------------------------------------------------------------
+class OverlayGraphicsView(QWidget):
+    """A widget that combines a scroll area with an overlay for progress bar."""
+    
+    def __init__(self, scroll_area, progress_bar):
+        super().__init__()
+        self.scroll_area = scroll_area
+        self.progress_bar = progress_bar
+        
+        # Main layout with just the scroll area
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(scroll_area)
+        
+        # Add progress bar as overlay (absolute positioning)
+        self.progress_bar.setParent(self)
+        self.progress_bar.move(0, 0)
+    
+    def updateProgressBarPosition(self):
+        """Update progress bar position to bottom of widget."""
+        if self.progress_bar.isVisible():
+            width = self.width()
+            height = 10
+            y_pos = self.height() - height
+            self.progress_bar.setGeometry(0, y_pos, width, height)
+    
+    def resizeEvent(self, event):
+        """Update progress bar position when widget is resized."""
+        self.updateProgressBarPosition()
+        super().resizeEvent(event)
 
 
 # ------------------------------------------------------------------
@@ -74,7 +107,7 @@ def ensure_dependencies():
 # CONSTANTS
 # ------------------------------------------------------------------
 VERSION = "1.0.0"
-SCRIPT_NAME = "AstroBackground Cleaner"
+SCRIPT_NAME = "AstroPhoto Processor"
 
 DEFAULT_PARAMS = {
     'wavelet_levels': 7,
@@ -82,7 +115,6 @@ DEFAULT_PARAMS = {
     'sigma_threshold': 5.0,
     'denoise_threshold': 0.0,
     'dark_mask_opacity': 0.0,
-    'enable_dark_mask': False,
     'preview_scale': 0.5, 
     'intensity': 0.4, 
 }
@@ -91,8 +123,8 @@ DEFAULT_PARAMS = {
 # ------------------------------------------------------------------
 # ENGINE
 # ------------------------------------------------------------------
-class BackgroundCleanerEngine:
-    """Core processing engine for background cleanr"""
+class AstroPhotoProcessorEngine:
+    """Core processing engine for AstroPhoto Processor"""
 
     def __init__(self):
         self.params = DEFAULT_PARAMS.copy()
@@ -104,40 +136,54 @@ class BackgroundCleanerEngine:
             if key in self.params:
                 self.params[key] = value
 
-    def process_image(self, image_data: np.ndarray) -> np.ndarray:
-        """Main processing pipeline"""
+    def process_image(self, image_data: np.ndarray,
+                  zoom_factor: float = 1.0) -> np.ndarray:
+        """Main processing pipeline (zoom_factor only used for smoothing)."""
         start_time = time.time()
         try:
             if image_data.dtype != np.float32:
                 image_data = image_data.astype(np.float32)
 
+            # 1. Background Intensity (now first)
+            intensity = self.params.get('intensity', 0.0)
+
+            # Convert to Lab color space
             lab_image = self._rgb_to_lab(image_data)
             luminance = lab_image[:, :, 0]
             original_shape = luminance.shape
 
-            wavelet_scales = self._wavelet_decompose(luminance)
+            # 2. Outlier Rejection (moved up)
+            background = self._estimate_background(luminance)
+
+            # 3. Background Contrast (moved down)
+            processed_luminance = luminance - background
+
+            # 4. Wavelet Decomposition (moved down)
+            wavelet_scales = self._wavelet_decompose(processed_luminance)
             processed_scales = self._process_background(wavelet_scales)
 
+            # 5. Noise Reduction (moved down)
             processed_luminance = self._wavelet_reconstruct(processed_scales, original_shape)
-            if processed_luminance.shape != luminance.shape:
-                h, w = luminance.shape[:2]
-                processed_luminance = processed_luminance[:h, :w]
 
+            # 6. Dark Mask (moved to bottom)
+            if self.params['dark_mask_opacity'] > 0:
+                # Apply dark mask to luminance channel
+                processed_luminance = self._apply_dark_mask(processed_luminance)
+
+            # Combine back to Lab and then RGB
             result_lab = np.stack(
                 [processed_luminance,
-                 lab_image[:, :, 1],
-                 lab_image[:, :, 2]],
+                lab_image[:, :, 1],
+                lab_image[:, :, 2]],
                 axis=2)
 
             result_rgb = self._lab_to_rgb(result_lab)
 
-            if self.params['enable_dark_mask'] and self.params['dark_mask_opacity'] > 0:
-                result_rgb = self._apply_dark_mask(result_rgb)
-
-            intensity = self.params.get('intensity', 0.0)
-            if intensity != 1.0:          # avoid an extra copy when already full
+            # Apply intensity blending (now using the processed result)
+            if intensity != 1.0:
                 result_rgb = (1 - intensity) * image_data + intensity * result_rgb
 
+            # Final clipping
             result_rgb = np.clip(result_rgb, 0, 1)
             self.last_processed = result_rgb
             self.processing_time = time.time() - start_time
@@ -145,6 +191,8 @@ class BackgroundCleanerEngine:
 
         except Exception as e:
             raise RuntimeError(f"Processing failed: {e}")
+
+
 
     # ------------------------------------------------------------------
     # Helper methods
@@ -225,8 +273,8 @@ class BackgroundCleanerEngine:
         if kernel % 2 == 0: 
             kernel += 1
 
-        from skimage.morphology import footprint_rectangle
-        footprint = footprint_rectangle([kernel,kernel])
+        from skimage.morphology import rectangle
+        footprint = rectangle(kernel, kernel)
 
         median_filtered = filters.median(approximation, footprint=footprint)
         blurred = filters.gaussian(median_filtered, sigma=1.0)
@@ -244,7 +292,7 @@ class BackgroundCleanerEngine:
         return np.sign(scale_data) * np.maximum(np.abs(scale_data) - threshold, 0)
 
     def _apply_dark_mask(self, image: np.ndarray) -> np.ndarray:
-        """Apply a radial darkening mask to the RGB image."""
+        """Apply a radial darkening mask to the image (works with both RGB and single-channel)."""
         opacity = self.params['dark_mask_opacity']
         h, w = image.shape[:2]
         y, x = np.ogrid[:h, :w]
@@ -252,13 +300,37 @@ class BackgroundCleanerEngine:
         distance = np.sqrt((x - center_x) ** 2 + (y - center_y) ** 2)
         max_dist = np.sqrt(center_x ** 2 + center_y ** 2)
 
-        # Create a radial gradient mask (H × W)
         mask = 1.0 - (distance / max_dist)
         mask = 1.0 - (opacity * mask)
 
-        mask = mask[:, :, np.newaxis]
+        if len(image.shape) == 2:  # Single channel
+            return image * mask
+        else:  # Multi-channel
+            mask = mask[:, :, np.newaxis]
+            return image * mask
 
-        return image * mask
+    def _apply_edge_preserving_smoothing(
+        self,
+        image: np.ndarray,
+        mod: float,
+        zoom_factor: float = 1.0
+    ) -> np.ndarray:
+        """Edge‑preserving smoothing using a bilateral filter whose diameter adapts to zoom."""
+        # Compute diameter = 3 × zoom_factor, keep it odd and at least 3
+        d = int(round(3 * zoom_factor * 1.414))
+        if d < 3:
+            d = 3
+        if d % 2 == 0:          # cv2.bilateralFilter expects an odd diameter
+            d += 1
+
+        img_float = image.astype(np.float32)
+        smoothed = cv2.bilateralFilter(
+            img_float,
+            d=d,                # dynamic diameter
+            sigmaColor=11.0,
+            sigmaSpace=11.0
+        )
+        return (1 - mod) * image + mod * smoothed
 
 
 # ------------------------------------------------------------------
@@ -268,9 +340,10 @@ class PreviewWorker(QThread):
     preview_ready = pyqtSignal(object)
     processing_time = pyqtSignal(float)
 
-    def __init__(self, engine: BackgroundCleanerEngine):
+    def __init__(self, engine: AstroPhotoProcessorEngine, preview_label):
         super().__init__()
         self.engine = engine
+        self.preview_label = preview_label  # new attribute
         self.full_image: Optional[np.ndarray] = None
         self._is_running = False
         self._lock = threading.Lock()
@@ -311,7 +384,9 @@ class PreviewWorker(QThread):
             fx=scale_factor,
             fy=scale_factor,
             interpolation=cv2.INTER_AREA)
-        return self.engine.process_image(small_img)
+        # Grab current zoom factor from the preview widget
+        zoom = getattr(self.preview_label, 'zoom_factor', 1.0)
+        return self.engine.process_image(small_img, zoom_factor=zoom)
 
 
 # ------------------------------------------------------------------
@@ -329,6 +404,7 @@ class ZoomableLabel(QLabel):
         self.offset_x: int = 0
         self.offset_y: int = 0
 
+        self.manual_zoom: bool = False
         self.is_panning: bool = False
         self.pan_start_pos: Optional[QPoint] = None
 
@@ -339,40 +415,60 @@ class ZoomableLabel(QLabel):
         self.updatePixmap()
 
     def updatePixmap(self) -> None:
-            """Render the image with the current zoom / pan settings."""
-            if self.base_image is None:
-                self.clear()
-                return
+        """Render the image with the current zoom / pan settings."""
+        if self.base_image is None:
+            self.clear()
+            return
 
-            view_w, view_h = self.width(), self.height()
-            img_w, img_h     = self.base_image.width(), self.base_image.height()
+        view_w, view_h = self.width(), self.height()
+        img_w, img_h     = self.base_image.width(), self.base_image.height()
 
-            if self.zoom_factor == 0.0:
-                desired_zoom = max(view_w / img_w, view_h / img_h)
-                self.zoom_factor = desired_zoom
+        # Only auto-fit if we're not in manual zoom mode
+        if self.zoom_factor == 0 and not self.manual_zoom:
+            desired_zoom = max(view_w / img_w, view_h / img_h)
+            self.zoom_factor = desired_zoom
+            self.offset_x = 0
+            self.offset_y = 0
 
-            w = int(img_w * self.zoom_factor)
-            h = int(img_h * self.zoom_factor)
+        # Calculate scaled dimensions
+        w = int(img_w * self.zoom_factor)
+        h = int(img_h * self.zoom_factor)
 
-            if w <= 0 or h <= 0:
-                return
+        if w <= 0 or h <= 0:
+            return
 
-            pixmap = QPixmap.fromImage(self.base_image).scaled(
-                w, h,
-                Qt.AspectRatioMode.IgnoreAspectRatio,
-                Qt.TransformationMode.SmoothTransformation)
+        # Create scaled pixmap
+        pixmap = QPixmap.fromImage(self.base_image).scaled(
+            w, h,
+            Qt.AspectRatioMode.IgnoreAspectRatio,
+            Qt.TransformationMode.SmoothTransformation)
 
-            if w <= view_w and h <= view_h:
-                x = (view_w - w) // 2
-                y = (view_h - h) // 2
-                rect = QRect(x, y, view_w, view_h)
-            else:
-                max_x, max_y = w - view_w, h - view_h
-                self.offset_x = max(0, min(self.offset_x, max_x))
-                self.offset_y = max(0, min(self.offset_y, max_y))
-                rect = QRect(self.offset_x, self.offset_y, view_w, view_h)
+        # Center the image if it's smaller than the view
+        if w < view_w or h < view_h:
+            x = (view_w - w) // 2
+            y = (view_h - h) // 2
+            self.setPixmap(pixmap)
+            self.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        else:
+            # For larger images, use the offset system
+            max_x = w - view_w
+            max_y = h - view_h
+            self.offset_x = max(0, min(self.offset_x, max_x))
+            self.offset_y = max(0, min(self.offset_y, max_y))
 
-            self.setPixmap(pixmap.copy(rect))
+            # Create a transparent pixmap of the view size
+            full_pixmap = QPixmap(view_w, view_h)
+            full_pixmap.fill(Qt.GlobalColor.transparent)
+
+            # Draw the cropped portion
+            painter = QPainter(full_pixmap)
+            source_rect = QRect(self.offset_x, self.offset_y, view_w, view_h)
+            painter.drawPixmap(0, 0, pixmap.copy(source_rect))
+            painter.end()
+
+            self.setPixmap(full_pixmap)
+            self.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
+
 
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
@@ -397,8 +493,38 @@ class ZoomableLabel(QLabel):
     def wheelEvent(self, event):
         delta = event.angleDelta().y()
         factor = 1.2 if delta > 0 else 0.833333
-        self.zoom_factor *= factor
-        self.zoom_factor = max(0.1, min(self.zoom_factor, 10))
+        
+        mouse_pos = event.position().toPoint()
+        
+        img_w, img_h = self.base_image.width(), self.base_image.height()
+        view_w, view_h = self.width(), self.height()
+        
+        current_w = int(img_w * self.zoom_factor)
+        current_h = int(img_h * self.zoom_factor)
+        
+        anchor_x = self.offset_x + mouse_pos.x()
+        anchor_y = self.offset_y + mouse_pos.y()
+        
+        new_zoom = self.zoom_factor * factor
+        self.zoom_factor = max(0.1, min(new_zoom, 10))
+        
+        new_w = int(img_w * self.zoom_factor)
+        new_h = int(img_h * self.zoom_factor)
+        
+        ratio_x = anchor_x / current_w if current_w > 0 else 0
+        ratio_y = anchor_y / current_h if current_h > 0 else 0
+        
+        new_anchor_x = int(ratio_x * new_w)
+        new_anchor_y = int(ratio_y * new_h)
+        
+        self.offset_x = new_anchor_x - mouse_pos.x()
+        self.offset_y = new_anchor_y - mouse_pos.y()
+        
+        max_x = max(0, new_w - view_w)
+        max_y = max(0, new_h - view_h)
+        self.offset_x = max(0, min(self.offset_x, max_x))
+        self.offset_y = max(0, min(self.offset_y, max_y))
+        
         self.updatePixmap()
         super().wheelEvent(event)
 
@@ -406,45 +532,149 @@ class ZoomableLabel(QLabel):
         self.preview_label.zoom_factor = 0.0 
         self.preview_label.updatePixmap()
 
+    def _adjust_offset_after_zoom(self, factor: float):
+        """Scale by *factor* while keeping the viewport centre fixed."""
+  
+        parent = self.parent()
+        if isinstance(parent, QScrollArea):
+            view_w, view_h = parent.viewport().size().width(), parent.viewport().size().height()
+        else:
+            view_w, view_h = self.width(), self.height()
+
+        img_w, img_h = self.base_image.width(), self.base_image.height()
+
+        center_x = self.offset_x + view_w / 2.0
+        center_y = self.offset_y + view_h / 2.0
+
+        self.zoom_factor *= factor
+
+        w = int(img_w * self.zoom_factor)
+        h = int(img_h * self.zoom_factor)
+
+        if w > view_w:
+            self.offset_x = int(center_x - view_w / 2.0)
+        else:
+            self.offset_x = 0
+
+        if h > view_h:
+            self.offset_y = int(center_y - view_h / 2.0)
+        else:
+            self.offset_y = 0
+
+        max_x, max_y = max(0, w - view_w), max(0, h - view_h)
+        self.offset_x = max(0, min(self.offset_x, max_x))
+        self.offset_y = max(0, min(self.offset_y, max_y))
+
     def zoomIn(self):
-        self.zoom_factor *= 1.2
-        self.updatePixmap()
+        self._zoom_with_center(1.2)
+        self.manual_zoom = True
 
     def zoomOut(self):
-        self.zoom_factor /= 1.2
-        self.zoom_factor = max(self.zoom_factor, 0.1)
+        self._zoom_with_center(0.833333)
+        self.manual_zoom = True
+
+    def _zoom_with_center(self, factor: float):
+        """Zoom around the center of the viewport."""
+        if self.base_image is None:
+            return
+            
+        view_w, view_h = self.width(), self.height()
+        img_w, img_h = self.base_image.width(), self.base_image.height()
+        
+        center_x = view_w / 2.0
+        center_y = view_h / 2.0
+        
+        current_w = int(img_w * self.zoom_factor)
+        current_h = int(img_h * self.zoom_factor)
+        
+        image_center_x = self.offset_x + center_x
+        image_center_y = self.offset_y + center_y
+        
+        new_zoom = self.zoom_factor * factor
+        self.zoom_factor = max(0.1, min(new_zoom, 10))
+        
+        new_w = int(img_w * self.zoom_factor)
+        new_h = int(img_h * self.zoom_factor)
+        
+        if current_w > 0 and current_h > 0:
+            ratio_x = image_center_x / current_w
+            ratio_y = image_center_y / current_h
+            new_image_center_x = ratio_x * new_w
+            new_image_center_y = ratio_y * new_h
+        else:
+            new_image_center_x = new_w / 2.0
+            new_image_center_y = new_h / 2.0
+        
+        self.offset_x = round(new_image_center_x - center_x)
+        self.offset_y = round(new_image_center_y - center_y)
+        
+        max_x = max(0, new_w - view_w)
+        max_y = max(0, new_h - view_h)
+        self.offset_x = max(0, min(self.offset_x, max_x))
+        self.offset_y = max(0, min(self.offset_y, max_y))
+        
+        self.updatePixmap()
+
+    def resetZoom(self):
+        self.zoom_factor = 1.0
+        self.manual_zoom = True
+
+        if self.base_image is not None:
+            img_w, img_h = self.base_image.width(), self.base_image.height()
+            view_w, view_h = self.width(), self.height()
+
+            scaled_w = int(img_w * self.zoom_factor)
+            scaled_h = int(img_h * self.zoom_factor)
+
+            if scaled_w > view_w:
+                self.offset_x = (scaled_w - view_w) // 2
+            else:
+                self.offset_x = 0
+
+            if scaled_h > view_h:
+                self.offset_y = (scaled_h - view_h) // 2
+            else:
+                self.offset_y = 0
+        else:
+            self.offset_x = 0
+            self.offset_y = 0
+
         self.updatePixmap()
 
     def fitToWindow(self):
         if self.base_image is None:
             return
-        view_w = self.width()
-        view_h = self.height()
-        img_w = self.base_image.width()
-        img_h = self.base_image.height()
-        scale_w = view_w / img_w
-        scale_h = view_h / img_h
-        self.zoom_factor = min(scale_w, scale_h)
+
+        view_w, view_h = self.width(), self.height()
+        img_w, img_h = self.base_image.width(), self.base_image.height()
+
+        # Calculate zoom factors for width and height
+        zoom_w = view_w / img_w
+        zoom_h = view_h / img_h
+
+        # Use the smaller zoom factor to fit entirely
+        self.zoom_factor = min(zoom_w, zoom_h)
+        self.manual_zoom = False
+        # Reset offsets to show from top-left
         self.offset_x = 0
         self.offset_y = 0
+
+        # Force update with the new zoom factor
         self.updatePixmap()
 
-    def resetZoom(self):
-        self.zoom_factor = 1.0
-        self.offset_x = 0
-        self.offset_y = 0
-        self.updatePixmap()
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
-        self.updatePixmap()
+        # Only auto-fit if we're not in manual zoom mode
+        if not self.manual_zoom:
+            self.fitToWindow()
 
 
 # ------------------------------------------------------------------
 # GUI
 # ------------------------------------------------------------------
-class BackgroundCleanerGUI(QDialog):
-    """Main GUI for the background cleanr."""
+class AstroPhotoProcessorGUI(QDialog):
+    """Main GUI for the AstroPhoto Processor."""
 
     def __init__(self, siril_interface: Any,
                  app: QApplication,
@@ -453,22 +683,19 @@ class BackgroundCleanerGUI(QDialog):
         self.siril = siril_interface
         self.app    = app
 
-        self.engine         = BackgroundCleanerEngine()
-        self.preview_worker = PreviewWorker(self.engine)
-
+        self.engine         = AstroPhotoProcessorEngine()
         self._build_ui()
 
-        # NEW: Debounce timer for all slider changes (except dark‑mask opacity)
+        self.preview_worker = PreviewWorker(self.engine, self.preview_label)  # will be re‑created after UI build
+
         self._preview_timer = QTimer(self)
         self._preview_timer.setSingleShot(True) 
         self._preview_timer.timeout.connect(self._start_preview)
 
-        # NDebounce timer for dark‑mask opacity (kept separate for clarity)
         self._dark_mask_timer = QTimer(self)
         self._dark_mask_timer.setSingleShot(True)  
         self._dark_mask_timer.timeout.connect(self._apply_dark_mask_preview)
 
-        # Resize‑timer – guard against rapid events
         self._resize_delay_ms = resize_delay_ms
         self._resize_timer    = QTimer(self)
         self._resize_timer.setSingleShot(True)
@@ -528,18 +755,27 @@ class BackgroundCleanerGUI(QDialog):
         left_layout = QVBoxLayout(left_widget)
         left_layout.setContentsMargins(10, 10, 10, 10)
 
-        left_layout.addWidget(self._create_processing_tab())
+        # Create a container that matches the preview group structure
+        self.left_container = QGroupBox()
+        left_container_layout = QVBoxLayout(self.left_container)
+        left_container_layout.setContentsMargins(10, 10, 10, 10)
 
+        # Add processing tab
+        left_container_layout.addWidget(self._create_processing_tab())
+
+        # Add help button (centered like zoom buttons)
         self.help_btn = QPushButton("Help")
-        self.help_btn.setFixedWidth(100) 
         self.help_btn.clicked.connect(self._show_help)
 
-        left_layout.addWidget(
-            self.help_btn,
-            alignment=Qt.AlignmentFlag.AlignCenter
-        )
+        # Use a layout for the help button to center it
+        help_layout = QHBoxLayout()
+        help_layout.addStretch()
+        help_layout.addWidget(self.help_btn)
+        help_layout.addStretch()
+        left_container_layout.addLayout(help_layout)
 
-        left_layout.addStretch()
+        # Add the container to left_widget
+        left_layout.addWidget(self.left_container)
 
         # ------------------------------------------------------------------
         # Right side – preview
@@ -549,7 +785,7 @@ class BackgroundCleanerGUI(QDialog):
         right_layout.setContentsMargins(10, 10, 10, 10)
 
         # Preview group
-        preview_group = QGroupBox("Preview")
+        preview_group = QGroupBox()
         preview_layout = QVBoxLayout(preview_group)
 
         # Zoomable preview label
@@ -565,17 +801,26 @@ class BackgroundCleanerGUI(QDialog):
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
         )
 
-    
         self.scroll_area = QScrollArea()
         self.scroll_area.setWidget(self.preview_label)
         self.scroll_area.setWidgetResizable(True)
         self.scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self.scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
 
-        preview_layout.addWidget(self.scroll_area)
+        # Progress bar (hidden by default) - will be added to overlay
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setRange(0, 0)
+        self.progress_bar.setVisible(False)
+        # Set progress bar to be at the bottom of the overlay
+        self.progress_bar.setStyleSheet("QProgressBar { background-color: #333; color: white; border: 1px solid #555; text-align: center; } QProgressBar::chunk { background-color: #88aaff; }")
+        self.progress_bar.setFixedHeight(10)
+
+        # Create overlay widget for progress bar to prevent layout shifts
+        self.overlay_widget = OverlayGraphicsView(self.scroll_area, self.progress_bar)
+        preview_layout.addWidget(self.overlay_widget)
 
         # ------------------------------------------------------------------
-        # ORIGINAL indicator (sticky in the top‑left corner of the preview)
+        # ORIGINAL indicator
         # ------------------------------------------------------------------
         self.original_indicator = QLabel("ORIGINAL", self.preview_label)
         self.original_indicator.setStyleSheet("""
@@ -586,12 +831,6 @@ class BackgroundCleanerGUI(QDialog):
         """)
         self.original_indicator.move(10, 10)          
         self.original_indicator.setVisible(False)
-
-        # Progress bar (hidden by default)
-        self.progress_bar = QProgressBar()
-        self.progress_bar.setRange(0, 0)          
-        self.progress_bar.setVisible(False)
-        preview_layout.addWidget(self.progress_bar)
 
         # Zoom / fit buttons
         zoom_btns = QHBoxLayout()
@@ -614,6 +853,7 @@ class BackgroundCleanerGUI(QDialog):
         splitter.addWidget(right_widget)
         splitter.setStretchFactor(0, 1)   
         splitter.setStretchFactor(1, 2)   
+
         # ------------------------------------------------------------------
         # Main dialog layout
         # ------------------------------------------------------------------
@@ -679,13 +919,13 @@ class BackgroundCleanerGUI(QDialog):
         layout.setSpacing(15)
 
         # ------------------------------------------------------------------
-        # NEW – Intensity slider (now the first widget)
+        # Intensity slider 
         # ------------------------------------------------------------------
-        intensity_group = QGroupBox("Background Extraction Intensity")
+        intensity_group = QGroupBox("Background Intensity")
         intensity_layout = QVBoxLayout(intensity_group)
 
         self.intensity_slider = QSlider(Qt.Orientation.Horizontal)
-        self.intensity_slider.setRange(0, 100)         
+        self.intensity_slider.setRange(0, 100)
         self.intensity_slider.setValue(
             int(self.engine.params['intensity'] * 100))
         self.intensity_slider.setTickInterval(10)
@@ -704,7 +944,54 @@ class BackgroundCleanerGUI(QDialog):
         layout.addWidget(intensity_group)
 
         # ------------------------------------------------------------------
-        # Wavelet levels
+        # Outlier Rejection
+        # ------------------------------------------------------------------
+        sigma_group = QGroupBox("Outlier Rejection")
+        sigma_layout = QVBoxLayout(sigma_group)
+
+        self.sigma_slider = QSlider(Qt.Orientation.Horizontal)
+        self.sigma_slider.setRange(10, 50)   # 1.0 – 5.0
+        self.sigma_slider.setValue(int(DEFAULT_PARAMS['sigma_threshold'] * 10))
+
+        sigma_control = QHBoxLayout()
+        sigma_control.addWidget(QLabel("Sigma Threshold:"))
+        sigma_control.addWidget(self.sigma_slider)
+        self.sigma_value = QLabel(f"{DEFAULT_PARAMS['sigma_threshold']:.1f}")
+        sigma_control.addWidget(self.sigma_value)
+        sigma_control.addStretch()
+
+        sigma_layout.addLayout(sigma_control)
+        sigma_layout.addWidget(QLabel(
+            "Threshold for sigma clipping (1.0‑5.0).\n"
+            "Higher values preserve more pixels as background."))
+        layout.addWidget(sigma_group)
+
+        # ------------------------------------------------------------------
+        # Background Contrast
+        # ------------------------------------------------------------------
+        median_group = QGroupBox("Background Contrast")
+        median_layout = QVBoxLayout(median_group)
+
+        self.median_slider = QSlider(Qt.Orientation.Horizontal)
+        self.median_slider.setRange(3, 15)
+        self.median_slider.setValue(DEFAULT_PARAMS['median_kernel_size'])
+        self.median_slider.setTickInterval(2)
+
+        median_control = QHBoxLayout()
+        median_control.addWidget(QLabel("Median Kernel:"))
+        median_control.addWidget(self.median_slider)
+        self.median_value = QLabel(str(DEFAULT_PARAMS['median_kernel_size']))
+        median_control.addWidget(self.median_value)
+        median_control.addStretch()
+
+        median_layout.addLayout(median_control)
+        median_layout.addWidget(QLabel(
+            "Kernel size for median filtering (odd numbers only).\n"
+            "Larger kernels smooth more but may lose detail."))
+        layout.addWidget(median_group)
+
+        # ------------------------------------------------------------------
+        # Wavelet Decomposition 
         # ------------------------------------------------------------------
         wavelet_group = QGroupBox("Wavelet Decomposition")
         wavelet_layout = QVBoxLayout(wavelet_group)
@@ -728,54 +1015,7 @@ class BackgroundCleanerGUI(QDialog):
         layout.addWidget(wavelet_group)
 
         # ------------------------------------------------------------------
-        # Median filter
-        # ------------------------------------------------------------------
-        median_group = QGroupBox("Background Estimation")
-        median_layout = QVBoxLayout(median_group)
-
-        self.median_slider = QSlider(Qt.Orientation.Horizontal)
-        self.median_slider.setRange(3, 15)
-        self.median_slider.setValue(DEFAULT_PARAMS['median_kernel_size'])
-        self.median_slider.setTickInterval(2)
-
-        median_control = QHBoxLayout()
-        median_control.addWidget(QLabel("Median Kernel:"))
-        median_control.addWidget(self.median_slider)
-        self.median_value = QLabel(str(DEFAULT_PARAMS['median_kernel_size']))
-        median_control.addWidget(self.median_value)
-        median_control.addStretch()
-
-        median_layout.addLayout(median_control)
-        median_layout.addWidget(QLabel(
-            "Kernel size for median filtering (odd numbers only).\n"
-            "Larger kernels smooth more but may lose detail."))
-        layout.addWidget(median_group)
-
-        # ------------------------------------------------------------------
-        # Sigma clipping
-        # ------------------------------------------------------------------
-        sigma_group = QGroupBox("Outlier Rejection")
-        sigma_layout = QVBoxLayout(sigma_group)
-
-        self.sigma_slider = QSlider(Qt.Orientation.Horizontal)
-        self.sigma_slider.setRange(10, 50)   # 1.0 – 5.0
-        self.sigma_slider.setValue(int(DEFAULT_PARAMS['sigma_threshold'] * 10))
-
-        sigma_control = QHBoxLayout()
-        sigma_control.addWidget(QLabel("Sigma Threshold:"))
-        sigma_control.addWidget(self.sigma_slider)
-        self.sigma_value = QLabel(f"{DEFAULT_PARAMS['sigma_threshold']:.1f}")
-        sigma_control.addWidget(self.sigma_value)
-        sigma_control.addStretch()
-
-        sigma_layout.addLayout(sigma_control)
-        sigma_layout.addWidget(QLabel(
-            "Threshold for sigma clipping (1.0‑5.0).\n"
-            "Higher values preserve more pixels as background."))
-        layout.addWidget(sigma_group)
-
-        # ------------------------------------------------------------------
-        # Denoising
+        # Noise Reduction
         # ------------------------------------------------------------------
         denoise_group = QGroupBox("Noise Reduction")
         denoise_layout = QVBoxLayout(denoise_group)
@@ -798,21 +1038,17 @@ class BackgroundCleanerGUI(QDialog):
         layout.addWidget(denoise_group)
 
         # ------------------------------------------------------------------
-        # Dark mask
+        # Dark Mask
         # ------------------------------------------------------------------
         mask_group = QGroupBox("Dark Mask")
         mask_layout = QVBoxLayout(mask_group)
 
-        self.mask_check = QCheckBox("Enable Dark Mask")
-        self.mask_check.setChecked(DEFAULT_PARAMS['enable_dark_mask'])
-
         self.mask_slider = QSlider(Qt.Orientation.Horizontal)
         self.mask_slider.setRange(0, 100)
         self.mask_slider.setValue(int(DEFAULT_PARAMS['dark_mask_opacity'] * 100))
-        self.mask_slider.setEnabled(DEFAULT_PARAMS['enable_dark_mask'])
+        self.mask_slider.setEnabled(True)
 
         mask_control = QHBoxLayout()
-        mask_control.addWidget(self.mask_check)
         mask_control.addWidget(QLabel("Opacity:"))
         mask_control.addWidget(self.mask_slider)
         self.mask_value = QLabel(f"{DEFAULT_PARAMS['dark_mask_opacity']:.2f}")
@@ -828,6 +1064,7 @@ class BackgroundCleanerGUI(QDialog):
         layout.addStretch()
         return widget
 
+
     # ------------------------------------------------------------------
     # Help dialog
     # ------------------------------------------------------------------
@@ -838,7 +1075,7 @@ class BackgroundCleanerGUI(QDialog):
         dlg.setWindowTitle("Help")
         layout = QVBoxLayout(dlg)
         layout.addWidget(help_widget)
-        dlg.resize(600, 450)
+        dlg.resize(600, 550)
         dlg.exec()
 
     def _create_help_tab(self) -> QWidget:
@@ -847,18 +1084,18 @@ class BackgroundCleanerGUI(QDialog):
         layout = QVBoxLayout(widget)
         help_text = """
         <h3 style="color: #88aaff;">About This Tool</h3>
-        <p>This tool implements astrophotography background optimization techniques.
+        <p>This tool implements astrophotography image optimization techniques.
         It uses wavelet decomposition and advanced filtering to harmonize 
         the sky background while preserving astronomical details.</p>
         <h4 style="color: #88aaff;">How It Works</h4>
-        <ol>
-        <li><b>Background Estimation:</b> Identifies and models the sky background</li>
-        <li><b>Background Subtraction:</b> Removes the estimated background</li>
-        <li><b>Wavelet Decomposition:</b> Breaks the image into frequency components</li>
-        <li><b>Background Estimation:</b> Identifies and models the sky background</li>
+        <ul>
+        <li><b>Background Intensity:</b> Identifies and adjusts the sky background darkness</li>
+        <li><b>Outlier Rejection:</b> Adjusts background preservation</li>
+        <li><b>Background Contrast:</b> Increases contrast between light and dark tones</li>
+        <li><b>Wavelet Decomposition:</b> Breaks the image into frequency components for sharpening</li>
         <li><b>Noise Reduction:</b> Reduces noise in the wavelet domain</li>
-        <li><b>Reconstruction:</b> Rebuilds the final image</li>
-        </ol>
+        <li><b>RDark Mask:</b> Applie a radial dark mask to soften the image</li>
+        </ul>
         <h4 style="color: #88aaff;">Usage Tips</h4>
         <ul>
         <li>Start with default parameters for most images</li>
@@ -877,7 +1114,7 @@ class BackgroundCleanerGUI(QDialog):
         """
         help_label = QLabel(help_text)
         help_label.setWordWrap(True)
-        help_label.setStyleSheet("color: #cccccc; font-size: 10pt;")
+        help_label.setStyleSheet("color: #cccccc; font-size: 12pt;")
         layout.addWidget(help_label)
         return widget
 
@@ -896,7 +1133,6 @@ class BackgroundCleanerGUI(QDialog):
         self.intensity_slider.valueChanged.connect(
             lambda val: self._on_param_change('intensity', val / 100.0))
 
-        self.mask_check.stateChanged.connect(self._toggle_dark_mask)
         self.mask_slider.valueChanged.connect(self._on_dark_mask_value_changed)
 
         self._preview_timer.timeout.connect(self._start_preview)
@@ -929,31 +1165,17 @@ class BackgroundCleanerGUI(QDialog):
             self.mask_value.setText(f"{value:.2f}")
         elif param_name == 'intensity':
             self.intensity_value.setText(f"{value:.2f}")
+        elif param_name == 'edge_smooth_mod':
+            self.edge_value.setText(f"{value:.2f}")
 
         # Restart debounce timer
         self._preview_timer.start(200)
 
-    def _toggle_dark_mask(self, state):
-        enabled = state == Qt.CheckState.Checked.value
-        self.engine.set_parameters(enable_dark_mask=enabled)
-        self.mask_slider.setEnabled(enabled)
-
-    # ------------------------------------------------------------------
     # Dark‑mask debounce helpers
-    # ------------------------------------------------------------------
     def _on_dark_mask_value_changed(self, val):
-        """
-        Called every time the opacity slider changes.
-        Restart the debounce timer so that preview updates only after
-        the user stops dragging for 200 ms.
-        """
         self._dark_mask_timer.start(200)  
 
     def _apply_dark_mask_preview(self):
-        """
-        Executed when the debounce timer fires.
-        Update the engine parameter and trigger a new preview.
-        """
         val = self.mask_slider.value()
         self.engine.set_parameters(dark_mask_opacity=val / 100.0)
 
@@ -966,13 +1188,13 @@ class BackgroundCleanerGUI(QDialog):
         """Store the last processing time for progress bar logic."""
         self.last_processing_time = t
 
-    # ------------------------------------------------------------------
     # Resize‑timer helpers
-    # ------------------------------------------------------------------
     def resizeEvent(self, event) -> None:
         """Simply rescale the preview on resize."""
         super().resizeEvent(event)
         self._rescale_preview()
+        if not getattr(self.preview_label, 'manual_zoom', False):
+            self.preview_label.fitToWindow()
 
     def _restart_preview_after_resize(self) -> None:
         """Not used – preview always runs."""
@@ -986,21 +1208,16 @@ class BackgroundCleanerGUI(QDialog):
             return
 
         try:
-            # Choose which image to display
             if self.show_original or self.engine.params.get('intensity', 0.0) == 0:
-                # Show the original (bottom‑up)
                 img_to_show = np.flipud(self.original_image)
             else:
-                # Use the last processed preview
                 if self.engine.last_processed is not None:
-                    # Upscale the processed preview to full resolution
                     orig_h, orig_w = self.original_image.shape[:2]
                     processed_up = cv2.resize(
                         np.flipud(self.engine.last_processed),
                         (orig_w, orig_h),
                         interpolation=cv2.INTER_AREA)
 
-                    # Blend with the original
                     intensity = self.engine.params.get('intensity', 0.0)
                     orig_resized = cv2.resize(
                         np.flipud(self.original_image),
@@ -1011,30 +1228,29 @@ class BackgroundCleanerGUI(QDialog):
                 else:
                     img_to_show = np.flipud(self.original_image)
 
-            self._display_image(img_to_show)
+            self._display_image(img_to_show, fit=False)
 
-            # Update the ORIGINAL indicator
             self.original_indicator.setVisible(self.show_original)
 
         except Exception as e:
             print(f"Rescale preview error: {e}")
 
-    def _display_image(self, img: np.ndarray):
+    def _display_image(self, img: np.ndarray, fit: bool = True):
         """Render the given NumPy image in the preview label."""
         qimg = self._numpy_to_qimage(img)
         self.preview_label.setBaseImage(qimg)
+        if fit:
+            self.preview_label.fitToWindow()
+        else:
+            self.preview_label.updatePixmap()
 
-        # Fit to window only the first time
         if not self._first_preview_done:
             self.preview_label.fitToWindow()
             self._first_preview_done = True
 
-    # ------------------------------------------------------------------
     # Image handling
-    # ------------------------------------------------------------------
     def _load_image(self):
         try:
-            # Try to get the current image from SIRIL
             try:
                 current_fname = self.siril.get_image_filename()
                 def is_tiff(fn):
@@ -1043,13 +1259,10 @@ class BackgroundCleanerGUI(QDialog):
                 if not is_tiff(current_fname):
                     try:
                         dir_name, base = os.path.split(current_fname)
-                        # Remove any existing extension and add .tif
                         new_base = os.path.splitext(base)[0]
                         new_path = os.path.join(dir_name, f"{new_base}")
 
-                        # Convert to 32‑bit TIFF – quote the path
                         self.siril.cmd(f'savetif32 {shlex.quote(new_path)}')
-                        # Load the newly created TIFF – quote again
                         self.siril.cmd(f'load {shlex.quote(new_path)}')
                         current_fname = new_path
                     except Exception as e:
@@ -1060,6 +1273,12 @@ class BackgroundCleanerGUI(QDialog):
                     raise RuntimeError("No image data received from SIRIL")
 
                 image_data = img.data
+                if image_data.dtype == np.uint16:
+                    image_data = image_data.astype(np.float32) / 65535.0
+                elif image_data.dtype == np.uint8:
+                    image_data = image_data.astype(np.float32) / 255.0
+                else:
+                    image_data = image_data.astype(np.float32)
                 if image_data.ndim == 3 and image_data.shape[0] == 3:
                     image_data = np.transpose(image_data, (1, 2, 0))
                 elif image_data.ndim == 2:
@@ -1075,7 +1294,6 @@ class BackgroundCleanerGUI(QDialog):
 
                 if file_dialog.exec() == QFileDialog.DialogCode.Accepted:
                     file_path = file_dialog.selectedFiles()[0]
-                    # Quote the path when passing to SIRIL
                     self.siril.cmd(f'load {shlex.quote(file_path)}')
                     img = self.siril.get_image()
                     if img is None:
@@ -1086,6 +1304,7 @@ class BackgroundCleanerGUI(QDialog):
                         image_data = np.transpose(image_data, (1, 2, 0))
                     elif image_data.ndim == 2:
                         image_data = np.repeat(image_data[:, :, np.newaxis], 3, axis=2)
+                        
 
                     self.status_label.setText(f"Image loaded: {os.path.basename(file_path)}")
                     self.status_label.setStyleSheet("color: #88ff88;")
@@ -1095,15 +1314,14 @@ class BackgroundCleanerGUI(QDialog):
 
             self.original_image = image_data.copy()
             self.current_image = image_data.copy()
+            self._display_image(np.flipud(self.original_image), fit=True)
 
-            # Store the path of the loaded file (without extension)
             if 'current_fname' in locals():
                 self.original_file_path = current_fname
             else:
                 self.original_file_path = file_path
 
             self._first_preview_done = False
-            # Reset preview toggle to processed view
             self.show_original = False
 
             self._start_preview()
@@ -1120,25 +1338,21 @@ class BackgroundCleanerGUI(QDialog):
         if self.current_image is None:
             return
 
-        # If a worker is already running, just update its image.
         if hasattr(self, "preview_worker") and self.preview_worker.isRunning():
             self.preview_worker.set_image(self.current_image)
             return
 
-        # No worker running – create a brand‑new one.
-        self.preview_worker = PreviewWorker(self.engine)
+        # Re‑create the worker to pass the preview label
+        self.preview_worker = PreviewWorker(self.engine, self.preview_label)
 
-        # Reconnect signals (they were connected only once in __init__).
         self.preview_worker.preview_ready.connect(
             self._update_preview,
             Qt.ConnectionType.QueuedConnection)
         self.preview_worker.processing_time.connect(
             self._handle_processing_time)
 
-        # Give it the image and start.
         self.preview_worker.set_image(self.current_image)
         self.preview_worker.start()
-
 
     def _update_preview(self, preview_data):
         """Update the preview widgets with new data."""
@@ -1146,26 +1360,21 @@ class BackgroundCleanerGUI(QDialog):
             return
 
         try:
-            # Store the processed preview for later use
             self.engine.last_processed = preview_data
 
-            # Flip the preview data so it matches SIRIL orientation
             preview_flipped = np.flipud(preview_data)
 
-            # Decide what to show
             if self.show_original or self.engine.params.get('intensity', 0.0) == 0:
                 img_to_show = np.flipud(self.original_image)
             else:
                 intensity = self.engine.params.get('intensity', 0.0)
                 if intensity > 0:
-                    # Upscale the processed preview
                     orig_h, orig_w = self.original_image.shape[:2]
                     processed_up = cv2.resize(
                         preview_flipped,
                         (orig_w, orig_h),
                         interpolation=cv2.INTER_AREA)
 
-                    # Blend with the original
                     orig_resized = cv2.resize(
                         np.flipud(self.original_image),
                         (orig_w, orig_h),
@@ -1175,27 +1384,25 @@ class BackgroundCleanerGUI(QDialog):
                 else:
                     img_to_show = preview_flipped
 
-            self._display_image(img_to_show)
+            self._display_image(img_to_show, fit=False)
 
-            # Update the ORIGINAL indicator
             self.original_indicator.setVisible(self.show_original)
 
-            # Show progress bar if needed
             t = getattr(self, 'last_processing_time', 0.0)
             if t > 1.0:
+                # Show progress bar at bottom
                 self.progress_bar.setVisible(True)
+                self.overlay_widget.updateProgressBarPosition()
                 QTimer.singleShot(int(t * 1000), lambda: self.progress_bar.setVisible(False))
 
         except Exception as e:
             print(f"Preview update error: {e}")
-
 
     def _numpy_to_qimage(self, data: np.ndarray) -> QImage:
         """Convert a NumPy array in [0,1] to a QImage (RGB)."""
         if data is None:
             return QImage()
 
-        # Clip and scale to 8‑bit
         data = np.clip(data, 0.0, 1.0)
         data_8bit = (data * 255).astype(np.uint8)
 
@@ -1219,8 +1426,8 @@ class BackgroundCleanerGUI(QDialog):
             result = self.engine.process_image(self.current_image)
             self.current_image = result
             self.show_original = False
-            self.engine.last_processed = result   
-            self._display_image(np.flipud(result))
+            self.engine.last_processed = result  
+            self._display_image(np.flipud(result), fit=False)
 
             self.status_label.setText("Processing complete!")
             self.status_label.setStyleSheet("color: #88ff88;")
@@ -1250,10 +1457,9 @@ class BackgroundCleanerGUI(QDialog):
 
                 if self.original_file_path:
                     base, _ = os.path.splitext(self.original_file_path)
-                    output_name = f"{base}_background_cleaned"
+                    output_name = f"{base}_ap_processed"
                 else:
-
-                    output_name = "background_cleaned"
+                    output_name = "ap_processed"
                 self.siril.cmd("save", f'"{output_name}"')
 
                 self.status_label.setText(f"Saved to SIRIL: {output_name}")
@@ -1284,9 +1490,7 @@ class BackgroundCleanerGUI(QDialog):
             self.preview_worker.stop()
         event.accept()
 
-    # ------------------------------------------------------------------
     # Keyboard handling for toggle preview
-    # ------------------------------------------------------------------
     def keyPressEvent(self, event):
         if event.key() == Qt.Key.Key_Space:
             self.show_original = not self.show_original
@@ -1320,7 +1524,7 @@ def main():
                                  f"Could not connect to SIRIL.\n{e}")
             return
 
-        gui = BackgroundCleanerGUI(siril, app)
+        gui = AstroPhotoProcessorGUI(siril, app)
         gui.show()
         sys.exit(app.exec())
 
