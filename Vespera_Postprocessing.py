@@ -1054,7 +1054,7 @@ class VesperaPostprocessingWindow(QMainWindow):
                     dir_path, base = os.path.split(orig_name)
                     name, ext = os.path.splitext(base)
 
-                    new_name = f"{name}_processed"
+                    new_name = f'"{name}_processed"'
 
                     self.siril.cmd("save", new_name)
             except Exception as e:
