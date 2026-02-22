@@ -61,6 +61,11 @@ class CLIProgressTracker:
         self.current_progress = 0
         self.cancelled = False
         self.start_time = None
+        # Per‑file timing for accurate speed calculation
+        self.current_file_start: Optional[float] = None
+        self.last_bytes_downloaded: int = 0
+        # Track last printed line length to clear properly
+        self.last_line_len: int = 0
 
     def start_operation(self, total_files: int):
         self.total_files = total_files
@@ -70,21 +75,38 @@ class CLIProgressTracker:
         print(f"Starting download of {total_files} files...")
 
     def update_file_progress(self, filename: str, bytes_downloaded: int, total_bytes: int):
+        # Detect new file and reset per‑file counters
+        if filename != self.current_file:
+            self.current_file_start = time.time()
+            self.last_bytes_downloaded = 0
         self.current_file = filename
         self.current_progress = bytes_downloaded / total_bytes * 100 if total_bytes > 0 else 0
         
-        # Calculate speed
-        elapsed = time.time() - (self.start_time or time.time())
-        speed = bytes_downloaded / elapsed if elapsed > 0 else 0
+        # Calculate per‑file average speed using cumulative bytes and elapsed time since file start
+        elapsed_file = time.time() - (self.current_file_start or time.time())
+        speed = bytes_downloaded / elapsed_file if elapsed_file > 0 else 0
+        self.last_bytes_downloaded = bytes_downloaded
         speed_str = f"{speed/1024:.1f} KB/s" if speed > 0 else "Calculating..."
         
         # Update progress display
         progress_bar = self._create_progress_bar(self.current_progress)
-        print(f"\rDownloading {filename} {progress_bar} {self.current_progress:.1f}% {speed_str}", end="", flush=True)
+        line = f"\rDownloading {filename} {progress_bar} {self.current_progress:.1f}% {speed_str}"
+        # Clear previous longer line if needed
+        if len(line) < self.last_line_len:
+            line += ' ' * (self.last_line_len - len(line))
+        print(line, end="", flush=True)
+        self.last_line_len = len(line)
+        if len(line) < self.last_line_len:
+            line += ' ' * (self.last_line_len - len(line))
+        print(line, end="", flush=True)
+        self.last_line_len = len(line)
 
     def file_completed(self):
         self.downloaded_files += 1
         self.current_progress = 0
+        # Reset per‑file timing for next file
+        self.current_file_start = None
+        self.last_bytes_downloaded = 0
         overall_progress = (self.downloaded_files / self.total_files * 100) if self.total_files > 0 else 0
         print(f"\rCompleted {self.downloaded_files}/{self.total_files} files ({overall_progress:.1f}%)")
 
