@@ -337,7 +337,25 @@ def download_and_process_dir(
             if any(char.isdigit() for char in objet):
                 objet = objet[:objet.find(next(filter(str.isdigit, objet)))] + " " + objet[objet.find(next(filter(str.isdigit, objet))):]
 
-            dest_dir = config["LOCAL_DIR"] / objet
+            if filename.lower().endswith(".fits"):
+                # Dark file special case – keep it under the object folder
+                if "-dark.fits" in filename:
+                    dest_dir = config["LOCAL_DIR"] / objet / "darks"
+                else:
+                    dest_dir = config["LOCAL_DIR"] / objet / "lights"
+            else:
+                # Keep original behaviour for non‑fits files
+                date_match = re.search(r"\d{4}-\d{2}-\d{2}", remote_path)
+                date = date_match.group(0) if date_match else "unknown"
+
+                obj_match = re.search(r"observation[-_]([^/]+)", remote_path)
+                objet = obj_match.group(1).upper() if obj_match else "UNKNOWN"
+                if any(char.isdigit() for char in objet):
+                    idx = next(i for i, c in enumerate(objet) if c.isdigit())
+                    objet = f"{objet[:idx]} {objet[idx:]}"
+
+                dest_dir = config["LOCAL_DIR"] / objet
+
             dest_dir.mkdir(parents=True, exist_ok=True)
 
             ext = Path(filename).suffix.lstrip(".")
