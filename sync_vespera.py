@@ -3,7 +3,7 @@
 FTP FITS / TIFF downloader from Vespera Smart Telescope with CLI interface
 Author:  G. Trainar
 Date:    2025‑11‑27
-Modified: 2026-01-20 - Refactored to use CLI with progress updates
+Modified: 2026-02-22 - more robust file extension management
 """
 
 from __future__ import annotations
@@ -31,7 +31,7 @@ DEFAULT_CONFIG = {
     "LOCAL_DIR": Path("/Users/Astro/Photo/Vespera"),
     "CHECK_INTERVAL": 1800,
     "MAX_FAILED_CHECKS": 10,
-    "FILE_TYPES": ('.fits', '.tif'),
+    "FILE_TYPES": ('.fits', '.fit', '.tif', '.tiff'),
     "DELETE_AFTER_DOWNLOAD": False
 }
 
@@ -443,8 +443,8 @@ def enhanced_cli_mode():
     
     # Get user preferences
     print("File Types to Download:")
-    print("1. TIFF files (.tif)")
-    print("2. FITS files (.fits)")
+    print("1. TIFF files")
+    print("2. FITS files")
     print("3. Both TIFF and FITS")
 
     while True:
@@ -458,9 +458,9 @@ def enhanced_cli_mode():
     
     file_types = []
     if file_choice in ["1", "3"]:
-        file_types.append('.tif')
+        file_types.extend(['.tif', '.tiff'])
     if file_choice in ["2", "3"]:
-        file_types.append('.fits')
+        file_types.extend(['.fits', '.fit'])
     
     # Get destination directory
     dest_dir = input(f"Destination directory [{DEFAULT_CONFIG['LOCAL_DIR']}]: ").strip()
