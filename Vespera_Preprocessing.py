@@ -95,14 +95,14 @@ Version 1.0.0 (2026‑01)
 # ---------------------------------------------------------------------------
 class ProcessingProgress:
     """Standardised progress percentages for each pipeline stage."""
-    CLEANUP         = 5
-    DARK_PROCESSING = 10
+    CLEANUP          = 5
+    DARK_PROCESSING  = 10
     LIGHT_CONVERSION = 20
-    CALIBRATION     = 30
-    REGISTRATION    = 50
-    STACKING        = 75
-    FINALIZATION    = 88
-    COMPLETE        = 100
+    CALIBRATION      = 30
+    REGISTRATION     = 50
+    STACKING         = 75
+    FINALIZATION     = 88
+    COMPLETE         = 100
 
 
 # Sky quality presets keyed by Bortle description
@@ -213,7 +213,7 @@ STACKING_METHODS: Dict[str, Dict[str, Any]] = {
 
 # Telescope specs keyed by model name
 TELESCOPES: Dict[str, Dict[str, Any]] = {
-    "Vespera":     {"focal_length_mm": 250.0, "pixel_size_um": 2.9,  "spcc_sensor": "Sony IMX585"},
+    "Vespera II":  {"focal_length_mm": 250.0, "pixel_size_um": 2.9,  "spcc_sensor": "Sony IMX585"},
     "Vespera Pro": {"focal_length_mm": 250.0, "pixel_size_um": 2.00, "spcc_sensor": "Sony IMX676"},
 }
 
@@ -364,9 +364,6 @@ class DiskUsageThread(QThread):
 class VesperaPlateSolver:
     """
     Plate‑solving helper for Vespera 16‑bit TIFF images.
-
-    Bridges Vespera's output and the final stretch, eliminating repetitive
-    manual steps while preserving full control over each stage.
     """
 
     # Regex to extract six numeric groups from a SIMBAD ICRS coordinate line
@@ -401,12 +398,22 @@ class VesperaPlateSolver:
             self.siril.log(f"DSO extraction error: {exc}", LogColor.SALMON)
 
     # ------------------------------------------------------------------
-    def plate_solve(self) -> bool:
-        """Run Siril's platesolve command with the stored focal/pixel parameters."""
+    def plate_solve(self, ra_deg: Optional[float] = None, dec_deg: Optional[float] = None) -> bool:
+        """
+        Run Siril's platesolve command.
+        """
         try:
-            self.siril.cmd(
-                f"platesolve -focal={self.focal_length_mm} -pixelsize={self.pixel_size_um}"
+            coords_arg = (
+                f" {ra_deg:.6f},{dec_deg:.6f}"
+                if ra_deg is not None and dec_deg is not None
+                else ""
             )
+            cmd = (
+                f"platesolve{coords_arg}"
+                f" -focal={self.focal_length_mm}"
+                f" -pixelsize={self.pixel_size_um}"
+            )
+            self.siril.cmd(cmd)
             return True
         except Exception as exc:
             self.siril.log(f"Plate solve error: {exc}", LogColor.SALMON)
@@ -416,8 +423,6 @@ class VesperaPlateSolver:
     def _query_simbad_coordinates(self, dso_name: str) -> Optional[tuple]:
         """
         Query the SIMBAD TAP service for ICRS coordinates of *dso_name*.
-
-        Returns ``(ra_deg, dec_deg)`` on success, ``None`` on failure.
         """
         import urllib.parse
         import urllib.request
@@ -451,8 +456,8 @@ class VesperaPlateSolver:
             dec_deg = sign * (abs(float(dec_d)) + float(dec_m) / 60.0 + float(dec_s) / 3600.0)
 
             self.siril.log(
-                f"SIMBAD coordinates for {dso_name}: RA={ra_deg:.12f} DEC={dec_deg:.12f}",
-                LogColor.GREEN,
+                f"SIMBAD coordinates for {dso_name}: RA={ra_deg:.6f} DEC={dec_deg:.6f}",
+                LogColor.BLUE,
             )
             return ra_deg, dec_deg
 
@@ -484,7 +489,6 @@ class ProcessingThread(QThread):
         self.workdir          = workdir
         self.settings         = settings
         self.folder_structure = folder_structure   # 'native' | 'organized'
-        self.manual_dso_name  = ""
         self.log_area: Optional[QTextEdit] = None
         self.console_messages: List[str]   = []
         self.light_seq_name   = "light"
@@ -578,8 +582,6 @@ class ProcessingThread(QThread):
     def _cleanup_folder(self, folder) -> int:
         """
         Remove FITS, sequence, and temporary sub‑directories from *folder*.
-
-        Returns the number of items deleted.
         """
         folder = str(folder)
         if not os.path.exists(folder):
@@ -633,15 +635,16 @@ class ProcessingThread(QThread):
         first_file = os.path.join(lights_dir, fits_files[0])
         try:
             with fits.open(first_file) as hdul:
-                instrume = hdul[0].header.get("INSTRUME", "").lower()
+                naxis1 = hdul[0].header.get("NAXIS1", 0)
+                naxis2 = hdul[0].header.get("NAXIS2", 0)
         except Exception as exc:
             self.siril.log(f"Error reading telescope from FITS: {exc}", LogColor.SALMON)
             return
 
-        if instrume.startswith("vesperapro"):
+        if naxis1 == 3536 and naxis2 == 3536:
             model = "Vespera Pro"
-        elif instrume.startswith("vespera"):
-            model = "Vespera"
+        elif naxis1 == 3840 and naxis2 == 2160:
+            model = "Vespera II"
         else:
             self.siril.log("Couldn't find telescope info, using defaults", LogColor.BLUE)
             return
@@ -744,9 +747,9 @@ class ProcessingThread(QThread):
         def emit(stage_rel: float, msg: str) -> None:
             """Emit progress scaled to the current chunk's slice of the bar."""
             if chunk_idx is not None and total_chunks:
-                chunk_span  = 58.0 / total_chunks
-                start       = 30 + (chunk_idx - 1) * chunk_span
-                percent     = int(start + (stage_rel / 58.0) * chunk_span)
+                chunk_span = 58.0 / total_chunks
+                start      = 30 + (chunk_idx - 1) * chunk_span
+                percent    = int(start + (stage_rel / 58.0) * chunk_span)
             else:
                 percent = int(stage_rel)
             self.progress.emit(percent, msg)
@@ -809,8 +812,7 @@ class ProcessingThread(QThread):
     def _prepare_chunks(src: Path, dest_root: Path, batch_size: int) -> None:
         """
         Sort FITS files in *src* by frame number, split them into
-        ``batch_size``‑sized sub‑folders under *dest_root/light-NNN/lights/*,
-        and duplicate the last file if a chunk contains only one frame.
+        ``batch_size``‑sized sub‑folders.
         """
         frame_re = re.compile(r".*?(\d+)\.(fits?|fit)$", re.IGNORECASE)
 
@@ -819,7 +821,6 @@ class ProcessingThread(QThread):
             key=lambda p: int(frame_re.fullmatch(p.name).group(1)),
         )
 
-        # Split into batches using a slice stride — no explicit loop needed
         chunks = [files[i : i + batch_size] for i in range(0, len(files), batch_size)]
 
         for idx, batch in enumerate(chunks, start=1):
@@ -866,8 +867,8 @@ class ProcessingThread(QThread):
             return
 
         session_dirs = sorted(Path(self.workdir, "Temp").glob("light-*"))
-        total_chunks  = len(session_dirs)
-        final_dir     = self._create_final_stack_dir()
+        total_chunks = len(session_dirs)
+        final_dir    = self._create_final_stack_dir()
 
         for idx, sess in enumerate(session_dirs, start=1):
             try:
@@ -964,33 +965,28 @@ class ProcessingThread(QThread):
     # ------------------------------------------------------------------
     def _run_poststacking(self) -> None:
         """Plate solve → SPCC → Auto‑stretch, if enabled."""
-        total_steps   = max(sum([
+        total_steps  = max(sum([
             bool(self.settings.get("bge")),
             bool(self.settings.get("spcc")),
             bool(self.settings.get("autostretch")),
         ]), 1)
-        current_step  = 0
+        current_step = 0
 
         if self.settings.get("batch_enabled"):
             self.siril.cmd("load", "final_stacked_batch.fit")
 
-        plate_solve_ok = False
         if self.settings.get("spcc"):
             current_step += 1
             self.progress.emit(int(current_step / total_steps * 100), "Plate solving...")
             plate_solve_ok = self._run_plate_solve(
                 self.settings["focal_length_mm"], self.settings["pixel_size_um"]
             )
-            if not plate_solve_ok:
-                self.siril.log("Plate solving failed, continuing...", LogColor.SALMON)
-
-        if self.settings.get("spcc"):
             if plate_solve_ok:
                 current_step += 1
                 self.progress.emit(int(current_step / total_steps * 100), "Color calibrating...")
                 self._run_spcc()
             else:
-                self.siril.log("Skipping SPCC – requires a plate‑solved image", LogColor.SALMON)
+                self.siril.log("Plate solving failed – skipping SPCC", LogColor.SALMON)
 
         if self.settings.get("autostretch"):
             current_step += 1
@@ -1006,7 +1002,18 @@ class ProcessingThread(QThread):
 
     # ------------------------------------------------------------------
     def _run_plate_solve(self, focal_length_mm: float, pixel_size_um: float) -> bool:
-        """Plate‑solve the current image after resolving coordinates from SIMBAD."""
+        """
+        Plate‑solve the current image.
+        """
+
+        if self.settings.get("stacking_method") == "Drizzle 2x Upscale":
+            focal_length_mm *= 2
+            self._log(
+                f"Drizzle 2× Upscale detected – using effective focal length "
+                f"{focal_length_mm:.1f} mm for plate solving",
+                LogColor.BLUE,
+            )
+        
         try:
             rel      = self.siril.get_image_filename()
             abs_path = Path(self.siril.get_siril_wd()) / Path(rel).name
@@ -1016,28 +1023,30 @@ class ProcessingThread(QThread):
                 pixel_size_um=pixel_size_um,
             )
 
-            if self.manual_dso_name:
-                solver.dso_name = self.manual_dso_name
-
+            ra_deg = dec_deg = None
             if solver.dso_name:
                 coords = solver._query_simbad_coordinates(solver.dso_name)
                 if coords:
                     solver.applied_coordinates = coords
+                    ra_deg, dec_deg = coords
                 else:
-                    self.siril.log(f"SIMBAD lookup failed for '{solver.dso_name}'", LogColor.SALMON)
+                    self.siril.log(
+                        f"SIMBAD lookup failed for '{solver.dso_name}'", LogColor.SALMON
+                    )
 
             if not solver.applied_coordinates:
                 self.siril.log("Cannot plate solve without valid coordinates", LogColor.SALMON)
                 return False
 
-            success = solver.plate_solve()
+            # Pass ra/dec directly on the CLI — this is what Siril actually uses
+            success = solver.plate_solve(ra_deg=ra_deg, dec_deg=dec_deg)
             self.siril.log(
                 "Plate solving completed!" if success else "Plate solving failed",
                 LogColor.GREEN if success else LogColor.SALMON,
             )
             if not success:
                 self.siril.log(
-                    "Check telescope selection (Vespera / Pro) and DSO name, then retry.",
+                    "Check telescope selection (Vespera II / Pro) and DSO name, then retry.",
                     LogColor.SALMON,
                 )
             return success
@@ -1143,7 +1152,7 @@ class ProcessingThread(QThread):
                 self.finished.emit(False, f"No {label} frames found")
                 return
 
-        self._log(f"Sky Quality: {self.settings['sky_quality']}",   LogColor.BLUE)
+        self._log(f"Sky Quality: {self.settings['sky_quality']}",    LogColor.BLUE)
         self._log(f"Stacking:    {self.settings['stacking_method']}", LogColor.BLUE)
         self._log(f"Structure:   {self.folder_structure}",            LogColor.BLUE)
         self._log(f"Found {num_darks} dark(s), {num_lights} light(s)", LogColor.BLUE)
@@ -1298,7 +1307,7 @@ class VesperaProGUI(QDialog):
         status_layout = QVBoxLayout(status_group)
 
         wd_row = QHBoxLayout()
-        self.lbl_workdir   = QLabel("Working directory: ...")
+        self.lbl_workdir    = QLabel("Working directory: ...")
         self.btn_browse_dir = QPushButton("Browse…")
         self.btn_browse_dir.clicked.connect(self._browse_working_directory)
         self.btn_browse_dir.setStyleSheet("QPushButton { padding: 2px 6px; }")
@@ -1364,7 +1373,7 @@ class VesperaProGUI(QDialog):
         opts_layout.addLayout(hbox_bg2p)
 
         feather_row = QHBoxLayout()
-        self.chk_feather   = QCheckBox("Feathering")
+        self.chk_feather    = QCheckBox("Feathering")
         self.chk_feather.setToolTip("Blend image edges to reduce stacking artifacts (0–50 px)")
         self.feather_slider = QSpinBox()
         self.feather_slider.setRange(0, 50)
@@ -1402,9 +1411,9 @@ class VesperaProGUI(QDialog):
         post_layout.addLayout(spcc_row)
 
         auto_clean_row = QHBoxLayout()
-        self.autostretch_cb  = QCheckBox("Auto‑Stretch")
+        self.autostretch_cb = QCheckBox("Auto‑Stretch")
         self.autostretch_cb.setToolTip("Auto‑stretch image (linked).")
-        self.chk_clean_temp  = QCheckBox("Clean temporary files")
+        self.chk_clean_temp = QCheckBox("Clean temporary files")
         self.chk_clean_temp.setToolTip("Delete process/ and masters/ folders after completion")
         auto_clean_row.addWidget(self.autostretch_cb)
         auto_clean_row.addWidget(self.chk_clean_temp)
@@ -1422,8 +1431,6 @@ class VesperaProGUI(QDialog):
         outer.setSpacing(6)
         outer.setContentsMargins(6, 6, 6, 6)
 
-        # Wrap everything in a scroll area so the tab stays usable at any
-        # window height and the content is never clipped.
         from PyQt6.QtWidgets import QScrollArea
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
@@ -1438,7 +1445,6 @@ class VesperaProGUI(QDialog):
         container_layout.setSpacing(10)
         container_layout.setContentsMargins(4, 4, 4, 4)
 
-        # ── helper: titled section ──────────────────────────────────────
         def make_section(title: str, html_body: str) -> QGroupBox:
             box    = QGroupBox(title)
             layout = QVBoxLayout(box)
@@ -1449,14 +1455,12 @@ class VesperaProGUI(QDialog):
             layout.addWidget(lbl)
             return box
 
-        # ── Quick Start ─────────────────────────────────────────────────
         container_layout.addWidget(make_section(
             "Quick Start",
             """
             <p><b>No Setup Required.</b> Point the plugin at your Vespera observation
             folder and press <b>Start Processing</b>. The plugin auto-detects your folder
             layout and telescope model from the FITS headers.</p>
-
             <ul style="margin-left:14px;">
               <li><b>Folder detection</b> – recognises three layouts automatically:
                 <ul style="margin-left:12px; margin-top:2px;">
@@ -1467,15 +1471,13 @@ class VesperaProGUI(QDialog):
               </li>
               <li><b>Sky quality</b> – choose your Bortle rating; sigma-clipping thresholds
                   are set accordingly.</li>
-              <li><b>Output</b> – a FITS image named
-                  <code>result_<i>exposure</i>s.fit</code>
+              <li><b>Output</b> – a FITS image named <code>result_<i>exposure</i>s.fit</code>
                   (or <code>final_stacked_batch.fit</code> in batch mode) is written
                   to the working directory.</li>
             </ul>
             """
         ))
 
-        # ── Stacking Options ────────────────────────────────────────────
         container_layout.addWidget(make_section(
             "Stacking Options",
             """
@@ -1524,8 +1526,7 @@ class VesperaProGUI(QDialog):
                 <td valign="top">Runs a second alignment pass with
                   <code>-framing=max</code>, preserving the maximum common field of
                   view. Improves alignment when field rotation across the session is
-                  significant. Not recommended with very small chunks (&lt; 20 frames).
-                </td>
+                  significant. Not recommended with very small chunks (&lt; 20 frames).</td>
               </tr>
               <tr>
                 <td valign="top"><b>Feathering</b></td>
@@ -1546,13 +1547,11 @@ class VesperaProGUI(QDialog):
             """
         ))
 
-        # ── Post-Stacking Options ───────────────────────────────────────
         container_layout.addWidget(make_section(
             "Post-Stacking Options",
             """
             <p>These steps run automatically on the final stacked image after
             calibration and registration are complete.</p>
-
             <table cellspacing="0" cellpadding="3" width="100%">
               <tr>
                 <td width="34%" valign="top"><b>SPCC</b><br>
@@ -1562,23 +1561,23 @@ class VesperaProGUI(QDialog):
                   Produces photometrically accurate, natural star colours by matching
                   measured star fluxes against the Gaia DR3 spectrophotometric catalogue.
                   <br><br>
-                  <b>Requires plate-solving</b> – the plugin runs
-                  <code>platesolve</code> automatically beforehand using the telescope
-                  focal length and pixel size read from the FITS header. If plate-solving
-                  fails, SPCC is skipped and a warning is logged.
+                  <b>Requires plate-solving</b> – the plugin runs <code>platesolve</code>
+                  automatically beforehand using the telescope focal length and pixel size
+                  read from the FITS header. RA/DEC coordinates are looked up in SIMBAD
+                  using the <code>OBJECT</code> keyword and written into the FITS header
+                  before solving. If plate-solving fails, SPCC is skipped and a warning
+                  is logged.
                   <br><br>
                   <b>Filter options</b>
                   <ul style="margin-left:12px; margin-top:3px;">
                     <li><b>No Filter</b> – broadband imaging under dark or mildly
                       light-polluted skies. Uses sensor spectral response only.</li>
                     <li><b>City Light Pollution (CLS)</b> – applies the Vaonis CLS
-                      filter transmission curve; compensates for the sodium / mercury
-                      blocking introduced by the filter.</li>
+                      filter transmission curve; compensates for sodium / mercury
+                      blocking.</li>
                     <li><b>Dual Band Ha/Oiii</b> – narrowband mode calibrated for
                       Hα 656.3 nm (BW 12 nm) in red and [O III] 500.7 nm (BW 12 nm)
-                      in green; blue channel left unfiltered. Yields natural-looking
-                      narrowband-palette images without manual channel reassignment.
-                    </li>
+                      in green; blue channel left unfiltered.</li>
                   </ul>
                 </td>
               </tr>
@@ -1587,48 +1586,39 @@ class VesperaProGUI(QDialog):
                 <td valign="top"><b>Auto-Stretch</b></td>
                 <td valign="top">
                   Applies Siril's linked auto-stretch (Midtone Transfer Function) so
-                  the saved FITS is immediately viewable without a separate stretch
-                  step.
+                  the saved FITS is immediately viewable without a separate stretch step.
                   <br><br>
-                  Parameters used:
-                  <ul style="margin-left:12px; margin-top:3px;">
-                    <li><b>Shadows clip</b> – <code>−2.8σ</code> below the median
-                      (clips the dark tail without crushing faint nebulosity).</li>
-                    <li><b>Target background</b> – <code>0.25</code> (places the sky
-                      background at 25 % of the display range; increase toward 0.35
-                      for very light-polluted skies).</li>
-                  </ul>
-                  The stretch is applied <i>linked</i> (same curve to all three
-                  channels), preserving the colour balance set by SPCC.
-                  <br><span style="color:#ffaa44;">⚠ Stretch is non-reversible
-                  in the saved file – disable this option if you want to keep the
-                  linear FITS for further processing in Siril or PixInsight.</span>
+                  Parameters: shadows clip <code>−2.8σ</code>, target background
+                  <code>0.25</code>. The stretch is applied <i>linked</i> (same curve
+                  to all three channels), preserving the colour balance set by SPCC.
+                  <br><span style="color:#ffaa44;">⚠ Stretch is non-reversible in the
+                  saved file – disable if you want to keep the linear FITS for further
+                  processing in Siril or PixInsight.</span>
                 </td>
               </tr>
               <tr><td colspan="2">&nbsp;</td></tr>
               <tr>
                 <td valign="top"><b>Clean temporary files</b></td>
                 <td valign="top">
-                  Deletes the <code>process/</code>, <code>masters/</code>, and
-                  <code>final_stack/</code> folders once processing completes
-                  successfully. Reclaims several gigabytes of intermediate FITS data.
+                  Deletes <code>process/</code>, <code>masters/</code>, and
+                  <code>final_stack/</code> once processing completes successfully.
+                  Reclaims several gigabytes of intermediate FITS data.
                   <br><span style="color:#ffaa44;">⚠ Leave this off until you are
-                  confident the result is correct – deleted intermediate files
-                  cannot be recovered without re-running the full pipeline.</span>
+                  confident the result is correct – deleted files cannot be recovered
+                  without re-running the full pipeline.</span>
                 </td>
               </tr>
             </table>
             """
         ))
 
-        # ── Processing order ────────────────────────────────────────────
         container_layout.addWidget(make_section(
             "Full Pipeline Order",
             """
             <ol style="margin-left:16px;">
               <li>Clean previous intermediate files <i>(if enabled)</i></li>
               <li>Build master dark (stack or copy single dark frame)</li>
-              <li>Auto-detect telescope from FITS <code>INSTRUME</code> header</li>
+              <li>Auto-detect telescope from FITS <code>NAXIS1/NAXIS2</code> dimensions</li>
               <li>Convert light frames to Siril sequence</li>
               <li>Calibrate – subtract dark, optionally debayer &amp; equalise CFA</li>
               <li>Background extraction <i>(if enabled)</i></li>
@@ -1637,6 +1627,7 @@ class VesperaProGUI(QDialog):
                 optional feathering</li>
               <li><i>Batch mode only:</i> repeat steps 4–8 per chunk, then
                 re-register and combine all chunk results</li>
+              <li>Look up RA/DEC in SIMBAD and write to FITS header <i>(if SPCC enabled)</i></li>
               <li>Plate solve <i>(if SPCC enabled)</i></li>
               <li>SPCC colour calibration <i>(if plate-solve succeeded)</i></li>
               <li>Auto-stretch <i>(if enabled)</i></li>
@@ -1645,7 +1636,6 @@ class VesperaProGUI(QDialog):
             """
         ))
 
-        # ── Known Limitations ───────────────────────────────────────────
         container_layout.addWidget(make_section(
             "Known Limitations",
             """
@@ -1665,12 +1655,11 @@ class VesperaProGUI(QDialog):
             """
         ))
 
-        # ── Credits ─────────────────────────────────────────────────────
         container_layout.addWidget(make_section(
             "Credits",
             """
             <p>Based on Siril's <code>OSC_Preprocessing_BayerDrizzle.ssf</code>.<br>
-            Optimised for Vaonis Vespera and Vespera Pro telescopes.<br>
+            Optimised for Vaonis Vespera II and Vespera Pro telescopes.<br>
             Developed for Siril. &copy; G. Trainar (2026) – MIT License.</p>
             """
         ))
@@ -1696,32 +1685,32 @@ class VesperaProGUI(QDialog):
     # ------------------------------------------------------------------
     def _load_settings(self) -> None:
         get = self.qsettings.value
-        self.combo_sky.setCurrentText(get("sky_quality", "Bortle 3-4 (Rural)"))
+        self.combo_sky.setCurrentText(get("sky_quality",      "Bortle 3-4 (Rural)"))
         self.combo_stack.setCurrentText(get("stacking_method", "Bayer Drizzle (Recommended)"))
-        self.chk_bg_extract.setChecked(get("bge",            False, type=bool))
-        self.feather_slider.setValue(   get("feather_px",    0,     type=int))
+        self.chk_bg_extract.setChecked( get("bge",             False, type=bool))
+        self.feather_slider.setValue(   get("feather_px",      0,     type=int))
         self.chk_feather.setChecked(    get("feather_enabled", False, type=bool))
-        self.chk_two_pass.setChecked(   get("two_pass",      False, type=bool))
-        self.chk_clean_temp.setChecked( get("clean_temp",    False, type=bool))
-        self.chk_batch.setChecked(      get("batch_enabled", False, type=bool))
-        self.spin_batch_size.setValue(  get("batch_size",    100,   type=int))
-        self.spcc_cb.setChecked(        get("spcc",          False, type=bool))
-        self.autostretch_cb.setChecked( get("autostretch",   True,  type=bool))
+        self.chk_two_pass.setChecked(   get("two_pass",        False, type=bool))
+        self.chk_clean_temp.setChecked( get("clean_temp",      False, type=bool))
+        self.chk_batch.setChecked(      get("batch_enabled",   False, type=bool))
+        self.spin_batch_size.setValue(  get("batch_size",      100,   type=int))
+        self.spcc_cb.setChecked(        get("spcc",            False, type=bool))
+        self.autostretch_cb.setChecked( get("autostretch",     True,  type=bool))
 
     def _save_settings(self) -> None:
         set_ = self.qsettings.setValue
-        set_("sky_quality",    self.combo_sky.currentText())
+        set_("sky_quality",     self.combo_sky.currentText())
         set_("stacking_method", self.combo_stack.currentText())
-        set_("bge",            self.chk_bg_extract.isChecked())
-        set_("feather_px",     self.feather_slider.value())
+        set_("bge",             self.chk_bg_extract.isChecked())
+        set_("feather_px",      self.feather_slider.value())
         set_("feather_enabled", self.chk_feather.isChecked())
-        set_("two_pass",       self.chk_two_pass.isChecked())
-        set_("clean_temp",     self.chk_clean_temp.isChecked())
-        set_("batch_enabled",  self.chk_batch.isChecked())
-        set_("batch_size",     self.spin_batch_size.value())
-        set_("spcc",           self.spcc_cb.isChecked())
-        set_("autostretch",    self.autostretch_cb.isChecked())
-        set_("spcc_filter",    self.spcc_filter_combo.currentText())
+        set_("two_pass",        self.chk_two_pass.isChecked())
+        set_("clean_temp",      self.chk_clean_temp.isChecked())
+        set_("batch_enabled",   self.chk_batch.isChecked())
+        set_("batch_size",      self.spin_batch_size.value())
+        set_("spcc",            self.spcc_cb.isChecked())
+        set_("autostretch",     self.autostretch_cb.isChecked())
+        set_("spcc_filter",     self.spcc_filter_combo.currentText())
 
     # ------------------------------------------------------------------
     # Folder detection
@@ -1815,11 +1804,11 @@ class VesperaProGUI(QDialog):
 
         if dark_files and light_files:
             return {
-                "dark_files":      dark_files,
-                "light_files":     light_files,
-                "num_darks":       len(dark_files),
-                "num_lights":      len(light_files),
-                "images_initial":  images_initial,
+                "dark_files":     dark_files,
+                "light_files":    light_files,
+                "num_darks":      len(dark_files),
+                "num_lights":     len(light_files),
+                "images_initial": images_initial,
             }
         return None
 
@@ -1865,21 +1854,21 @@ class VesperaProGUI(QDialog):
     def _build_settings(self) -> Dict[str, Any]:
         """Collect all widget values into a single settings dict."""
         return {
-            "sky_quality":    self.combo_sky.currentText(),
+            "sky_quality":     self.combo_sky.currentText(),
             "stacking_method": self.combo_stack.currentText(),
-            "bge":            self.chk_bg_extract.isChecked(),
-            "feather_px":     self.feather_slider.value(),
+            "bge":             self.chk_bg_extract.isChecked(),
+            "feather_px":      self.feather_slider.value(),
             "feather_enabled": self.chk_feather.isChecked(),
-            "two_pass":       self.chk_two_pass.isChecked(),
-            "clean_temp":     self.chk_clean_temp.isChecked(),
-            "batch_enabled":  self.chk_batch.isChecked(),
-            "batch_size":     self.spin_batch_size.value(),
-            "spcc":           self.spcc_cb.isChecked(),
-            "autostretch":    self.autostretch_cb.isChecked(),
+            "two_pass":        self.chk_two_pass.isChecked(),
+            "clean_temp":      self.chk_clean_temp.isChecked(),
+            "batch_enabled":   self.chk_batch.isChecked(),
+            "batch_size":      self.spin_batch_size.value(),
+            "spcc":            self.spcc_cb.isChecked(),
+            "autostretch":     self.autostretch_cb.isChecked(),
             "focal_length_mm": 250.0,
-            "pixel_size_um":  2.9,
-            "spcc_sensor":    "Sony IMX585",
-            "spcc_filter":    self.spcc_filter_combo.currentText(),
+            "pixel_size_um":   2.9,
+            "spcc_sensor":     "Sony IMX585",
+            "spcc_filter":     self.spcc_filter_combo.currentText(),
         }
 
     def _start_processing(self) -> None:
@@ -1890,7 +1879,6 @@ class VesperaProGUI(QDialog):
         self.status.setText("Processing...")
         self.log_area.clear()
 
-        # Clean up any leftover Temp directory
         temp_dir = Path(self.siril.get_siril_wd()) / "Temp"
         if temp_dir.exists():
             try:
@@ -1916,7 +1904,6 @@ class VesperaProGUI(QDialog):
             else:
                 self.num_chunks = 1
 
-            # Processing thread
             self.worker = ProcessingThread(self.siril, workdir, settings, self.folder_structure)
             self.worker.log_area = self.log_area
             self.worker.progress.connect(self._on_progress)
@@ -1924,7 +1911,6 @@ class VesperaProGUI(QDialog):
             self.worker.log.connect(self._log)
             self.worker.start()
 
-            # Disk‑usage log
             logs_dir  = Path(workdir) / "logs"
             logs_dir.mkdir(parents=True, exist_ok=True)
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
