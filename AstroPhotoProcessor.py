@@ -140,11 +140,19 @@ class AstroPhotoProcessorEngine:
         self.params = DEFAULT_PARAMS.copy()
         self.last_processed: Optional[np.ndarray] = None
         self.processing_time: float = 0.0
+        self.reference_size: int = 0  # shorter dimension of the full-res image
 
     def set_parameters(self, **kwargs):
         for key, value in kwargs.items():
             if key in self.params:
                 self.params[key] = value
+
+    def set_reference_image(self, image_data: np.ndarray):
+        """Record the full-resolution image dimensions so that scale-dependent
+        parameters (median kernel, Gaussian sigma) produce equivalent spatial
+        behaviour on both the downscaled preview and the full-res render."""
+        h, w = image_data.shape[:2]
+        self.reference_size = min(h, w)
 
     def process_image(self, image_data: np.ndarray,
                   zoom_factor: float = 1.0) -> np.ndarray:
@@ -282,11 +290,23 @@ class AstroPhotoProcessorEngine:
         return processed
 
     def _estimate_background(self, approximation: np.ndarray) -> np.ndarray:
+        h, w = approximation.shape[:2]
+        current_size = min(h, w)
+
+        # Scale the kernel and Gaussian sigma proportionally to the image size
+        # so that background estimation is spatially equivalent on both the
+        # downscaled preview and the full-resolution render.
+        if self.reference_size > 0 and current_size > 0:
+            scale = current_size / self.reference_size
+        else:
+            scale = 1.0
+
         kernel = self.params['median_kernel_size']
-        if kernel < 3:
-            kernel = 3
-        if kernel % 2 == 0: 
+        kernel = max(3, int(round(kernel * scale)))
+        if kernel % 2 == 0:
             kernel += 1
+
+        sigma = max(0.5, 1.0 * scale)
 
         try:
             from skimage.morphology import footprint_rectangle
@@ -296,7 +316,7 @@ class AstroPhotoProcessorEngine:
             footprint = rectangle(kernel, kernel)
 
         median_filtered = filters.median(approximation, footprint=footprint)
-        blurred = filters.gaussian(median_filtered, sigma=1.0)
+        blurred = filters.gaussian(median_filtered, sigma=sigma)
 
         std = np.std(blurred)
         threshold = self.params['sigma_threshold'] * std
@@ -1588,6 +1608,10 @@ class AstroPhotoProcessorGUI(QDialog):
         self.original_image = image_data.copy()
         self.current_image = image_data.copy()
         self.original_file_path = file_path
+
+        # Record full-res dimensions so _estimate_background can scale its
+        # kernel and sigma consistently for both preview and full-res renders.
+        self.engine.set_reference_image(image_data)
 
         self._display_image(np.flipud(self.original_image), fit=True)
         self._first_preview_done = False
