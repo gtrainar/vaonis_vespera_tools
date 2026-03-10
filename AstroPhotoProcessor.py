@@ -193,8 +193,10 @@ class AstroPhotoProcessorEngine:
             result_rgb = self._lab_to_rgb(result_lab)
 
             # Apply intensity blending (now using the processed result)
-            if intensity != 1.0:
+            if intensity != 0.0:
                 result_rgb = (1 - intensity) * image_data + intensity * result_rgb
+            else:
+                result_rgb = image_data
 
             # 6. Levels & stretch (black point / white point / midtone)
             result_rgb = self._apply_levels(result_rgb)
@@ -1691,10 +1693,10 @@ class AstroPhotoProcessorGUI(QDialog):
             self.status_label.setStyleSheet("color: #ffcc00; font-size: 10pt; background: transparent;")
             self.app.processEvents()
 
-            result = self.engine.process_image(self.current_image)
-            self.current_image = result
+            result = self.engine.process_image(self.original_image)
+            self.last_rendered = result
             self.show_original = False
-            self.engine.last_processed = result  
+            self.engine.last_processed = result
             self._display_image(np.flipud(result), fit=False)
 
             self.status_label.setText("Processing complete!")
@@ -1710,14 +1712,15 @@ class AstroPhotoProcessorGUI(QDialog):
 
     def _save_result(self):
         try:
-            if self.current_image is None:
+            save_data = getattr(self, 'last_rendered', None) if getattr(self, 'last_rendered', None) is not None else self.current_image
+            if save_data is None:
                 raise RuntimeError("No processed image to save")
 
             try:
-                if self.current_image.ndim == 3:
-                    siril_data = np.transpose(self.current_image, (2, 0, 1))
+                if save_data.ndim == 3:
+                    siril_data = np.transpose(save_data, (2, 0, 1))
                 else:
-                    siril_data = self.current_image
+                    siril_data = save_data
 
                 siril_data = siril_data.astype(np.float32)
 
@@ -1743,7 +1746,7 @@ class AstroPhotoProcessorGUI(QDialog):
 
                 if file_dialog.exec() == QFileDialog.DialogCode.Accepted:
                     file_path = file_dialog.selectedFiles()[0]
-                    result_16bit = (self.current_image * 65535).astype(np.uint16)
+                    result_16bit = (save_data * 65535).astype(np.uint16)
                     cv2.imwrite(file_path, result_16bit)
 
                     self.status_label.setText(f"Saved: {file_path}")
