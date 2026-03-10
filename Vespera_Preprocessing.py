@@ -1,10 +1,10 @@
 ##############################################
-# Vespera — Preprocessing 
+# Vespera — Preprocessing
 # Automated Stacking for Alt‑Az Mounts
 ##############################################
 # (c) 2026 G. Trainar - MIT License
 # Vespera Preprocessing
-# Version 1.3.0
+# Version 1.3.1
 #
 # Credits
 # ----------------
@@ -20,6 +20,8 @@ import shutil
 import time
 import re
 import json
+import urllib.parse
+import urllib.request
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -31,23 +33,25 @@ except ImportError:
     print("Error: sirilpy module not found. This script must be run within Siril.")
     sys.exit(1)
 
-s.ensure_installed("PyQt6", "astropy")
+s.ensure_installed("PyQt6")
 
-from PyQt6.QtCore import Qt, QThread, pyqtSignal
+from PyQt6.QtCore import Qt, QThread, QTimer, pyqtSignal
 from PyQt6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QDialog,
     QFileDialog, QGroupBox, QHBoxLayout, QLabel,
     QMessageBox, QProgressBar, QPushButton, QSpinBox, QTabWidget,
     QTextEdit, QVBoxLayout, QWidget, QFrame, QSizePolicy,
 )
-from astropy.io import fits
-
 # ---------------------------------------------------------------------------
 # Version & Changelog
 # ---------------------------------------------------------------------------
-VERSION = "1.3.0"
+VERSION = "1.3.1"
 
 CHANGELOG = """
+Version 1.3.0 (2026-03)
+- Memory management for large datasets
+- Local plate solving if available
+
 Version 1.3.0 (2026-03)
 - Redesigned GUI: pipeline-staged layout
 - Added "RICE 16 Compression"
@@ -77,9 +81,10 @@ class ProcessingProgress:
     CLEANUP          = 5
     DARK_PROCESSING  = 10
     LIGHT_CONVERSION = 20
-    CALIBRATION      = 30
-    BACKGROUND_EXTR  = 35
-    PLATESOLVING    = 40
+    CALIBRATION      = 25
+    BACKGROUND_EXTR  = 30
+    GET_COORDINATES  = 35
+    PLATESOLVING     = 40
     REGISTRATION     = 45
     STACKING         = 55
     FINALIZATION     = 88
@@ -115,13 +120,7 @@ SKY_PRESETS: Dict[str, Dict[str, Any]] = {
 STACKING_METHODS: Dict[str, Dict[str, Any]] = {
     "Bayer Drizzle (Recommended)": {
         "description": "Gaussian kernel + area interp — best for 10–15° field rotation",
-        "tooltip": (
-            "Uses Gaussian drizzle kernel with area‑based interpolation.\n\n"
-            "• Gaussian kernel: Produces smooth, centrally‑peaked PSFs\n"
-            "• Area interpolation: Reduces moiré patterns from field rotation\n"
-            "• Best choice for typical Vespera sessions with 10‑15° rotation\n\n"
-            "Technical: scale=1.0, pixfrac=1.0, kernel=gaussian, interp=area"
-        ),
+        "tooltip": "scale=1.0 · pixfrac=1.0 · kernel=gaussian · interp=area\nBest for typical Vespera sessions. Smooth PSFs, handles field rotation.",
         "use_drizzle": True,
         "drizzle_scale": 1.0,
         "drizzle_pixfrac": 1.0,
@@ -131,13 +130,7 @@ STACKING_METHODS: Dict[str, Dict[str, Any]] = {
     },
     "Bayer Drizzle (Square)": {
         "description": "Square kernel — flux-preserving, preferred for photometry",
-        "tooltip": (
-            "Uses classic square drizzle kernel (original HST algorithm).\n\n"
-            "• Square kernel: Mathematically flux‑preserving by construction\n"
-            "• May show subtle grid patterns with significant field rotation\n"
-            "• Better for photometry applications\n\n"
-            "Technical: scale=1.0, pixfrac=1.0, kernel=square, interp=area"
-        ),
+        "tooltip": "scale=1.0 · pixfrac=1.0 · kernel=square · interp=area\nFlux-preserving by construction. Preferred for photometry.",
         "use_drizzle": True,
         "drizzle_scale": 1.0,
         "drizzle_pixfrac": 1.0,
@@ -145,48 +138,19 @@ STACKING_METHODS: Dict[str, Dict[str, Any]] = {
         "interp": "area",
         "feather_px": 0,
     },
-    "Bayer Drizzle (Nearest)": {
-        "description": "Nearest-neighbour interp — eliminates moiré at CFA boundaries",
-        "tooltip": (
-            "Uses nearest‑neighbor interpolation to eliminate moiré.\n\n"
-            "• Nearest interpolation: No interpolation artifacts at CFA boundaries\n"
-            "• May appear slightly blocky at pixel level\n"
-            "• Try this if other methods show checkerboard patterns\n\n"
-            "Technical: scale=1.0, pixfrac=1.0, kernel=gaussian, interp=nearest"
-        ),
-        "use_drizzle": True,
-        "drizzle_scale": 1.0,
-        "drizzle_pixfrac": 1.0,
-        "drizzle_kernel": "gaussian",
-        "interp": "nearest",
-        "feather_px": 0,
-    },
+
     "Standard Registration": {
         "description": "No drizzle — fast, good for <30 min sessions with <5° rotation",
-        "tooltip": (
-            "Standard debayer‑then‑register workflow (no drizzle).\n\n"
-            "• Faster processing, lower memory usage\n"
-            "• Works well for sessions under 30 minutes\n"
-            "• May show field rotation artifacts at image edges\n"
-            "• Not recommended for sessions with >5° total rotation"
-        ),
+        "tooltip": "Debayer → register workflow. No drizzle.\nFaster and lighter. BGE unavailable (CFA pattern lost after debayer).",
         "use_drizzle": False,
         "feather_px": 0,
     },
     "Drizzle 2x Upscale": {
         "description": "2× output resolution — requires 50+ well-dithered frames",
-        "tooltip": (
-            "Upscales to 2x resolution using drizzle algorithm.\n\n"
-            "• Requires 50+ frames with good sub‑pixel dithering\n"
-            "• Output will be 7072×7072 pixels (vs 3536×3536)\n"
-            "• Uses square kernel (only valid choice for scale>1)\n"
-            "• Significantly increased processing time and file sizes\n\n"
-            "Note: Lanczos kernels cannot be used with scale>1.0\n"
-            "Technical: scale=2.0, pixfrac=1.0, kernel=square, interp=area"
-        ),
+        "tooltip": "scale=2.0 · pixfrac=0.5 · kernel=square · interp=area\n2× native resolution. Requires 50+ well-dithered frames. 2-Pass disabled.",
         "use_drizzle": True,
         "drizzle_scale": 2.0,
-        "drizzle_pixfrac": 1.0,
+        "drizzle_pixfrac": 0.5,
         "drizzle_kernel": "square",
         "interp": "area",
         "feather_px": 0,
@@ -234,8 +198,8 @@ QGroupBox#stage {
 }
 
 QLabel             { color: #b0b0cc; font-size: 12pt; }
-QLabel#hint        { color: #5566aa; font-size: 10pt; font-family: 'SF Mono', 'Menlo', monospace; }
-QLabel#sigma       { color: #44aa88; font-size: 10pt; font-family: 'SF Mono', 'Menlo', monospace; }
+QLabel#hint        { color: #5566aa; font-size: 10pt; font-family: 'Menlo', 'Monaco', 'Courier New'; }
+QLabel#sigma       { color: #44aa88; font-size: 10pt; font-family: 'Menlo', 'Monaco', 'Courier New'; }
 QLabel#status      { color: #ffcc44; font-size: 11pt; }
 
 QComboBox {
@@ -294,7 +258,7 @@ QPushButton#browse:hover { border-color: #6688cc; color: #88aaff; }
 
 QTextEdit {
     background-color: #14141e; color: #8888aa; border: 1px solid #2a2a3e;
-    border-radius: 4px; font-family: 'SF Mono', 'Menlo', 'Monaco', monospace;
+    border-radius: 4px; font-family: 'Menlo', 'Monaco', 'Courier New';
     font-size: 9pt; padding: 4px;
 }
 
@@ -328,90 +292,6 @@ def make_hline() -> QFrame:
     line.setFrameShape(QFrame.Shape.HLine)
     return line
 
-# ---------------------------------------------------------------------------
-# Plate solver
-# ---------------------------------------------------------------------------
-class VesperaPlateSolver:
-    """Plate‑solving helper for Vespera 16‑bit TIFF images."""
-
-    _ICRS_RE = re.compile(
-        r"(\d+)\s+(\d+)\s+([\d.]+)\s+([+-]?\d+)\s+(\d+)\s+([\d.]+)"
-    )
-
-    def __init__(
-        self,
-        siril_interface: Any,
-        filename: Optional[str] = None,
-        focal_length_mm: float = 250.0,
-        pixel_size_um: float = 2.00,
-    ) -> None:
-        self.siril = siril_interface
-        self.filename = filename
-        self.focal_length_mm = focal_length_mm
-        self.pixel_size_um = pixel_size_um
-        self.dso_name: Optional[str] = None
-        self.applied_coordinates: Optional[tuple] = None
-        if filename:
-            self._extract_dso_name()
-
-    def _extract_dso_name(self) -> None:
-        if not self.filename or not os.path.exists(self.filename):
-            self.siril.log(f"Cannot extract DSO name: file not found: {self.filename}", LogColor.SALMON)
-            return
-        try:
-            with fits.open(self.filename) as hdulist:
-                self.dso_name = str(hdulist[0].header.get("OBJECT", "")).strip() or None
-        except Exception as exc:
-            self.siril.log(f"DSO extraction error: {exc}", LogColor.SALMON)
-
-    def plate_solve(self, ra_deg: Optional[float] = None, dec_deg: Optional[float] = None) -> bool:
-        try:
-            coords_arg = (
-                f" {ra_deg:.6f},{dec_deg:.6f}"
-                if ra_deg is not None and dec_deg is not None
-                else ""
-            )
-            cmd = (
-                f"platesolve{coords_arg}",
-                f" -focal={self.focal_length_mm}",
-                f" -pixelsize={self.pixel_size_um}",
-                "-force"
-            )
-            self.siril.cmd(*cmd)
-            return True
-        except Exception as exc:
-            self.siril.log(f"Plate solve error: {exc}", LogColor.SALMON)
-            return False
-
-    def _query_simbad_coordinates(self, dso_name: str) -> Optional[tuple]:
-        import urllib.parse
-        import urllib.request
-
-        params = {"output.format": "ASCII", "Ident": dso_name}
-        url = f"https://simbad.cds.unistra.fr/simbad/sim-id?{urllib.parse.urlencode(params)}"
-        try:
-            with urllib.request.urlopen(url, timeout=30) as response:
-                data = response.read().decode("utf-8")
-        except Exception as exc:
-            self.siril.log(f"SIMBAD query error: {exc}", LogColor.SALMON)
-            return None
-
-        for line in data.splitlines():
-            if not line.startswith("Coordinates(ICRS,ep=J2000,eq=2000):"):
-                continue
-            _, coord_part = line.split(":", 1)
-            match = self._ICRS_RE.search(coord_part)
-            if not match:
-                self.siril.log("Could not parse ICRS coordinates from SIMBAD response", LogColor.SALMON)
-                return None
-            ra_h, ra_m, ra_s, dec_d, dec_m, dec_s = match.groups()
-            ra_deg  = 15.0 * (float(ra_h) + float(ra_m) / 60.0 + float(ra_s) / 3600.0)
-            sign    = -1 if dec_d.strip().startswith("-") else 1
-            dec_deg = sign * (abs(float(dec_d)) + float(dec_m) / 60.0 + float(dec_s) / 3600.0)
-            return ra_deg, dec_deg
-
-        self.siril.log(f"SIMBAD did not return coordinates for {dso_name}", LogColor.SALMON)
-        return None
 
 # ---------------------------------------------------------------------------
 # Processing Thread
@@ -421,7 +301,7 @@ class ProcessingThread(QThread):
 
     progress = pyqtSignal(int, str)
     finished = pyqtSignal(bool, str)
-    log      = pyqtSignal(str)
+    log      = pyqtSignal(str, object)  # (message, LogColor | None)
 
     def __init__(self, siril: Any, workdir: str, settings: Dict[str, Any],
                  folder_structure: str, gaia_available: bool = False) -> None:
@@ -437,8 +317,7 @@ class ProcessingThread(QThread):
         self.final_filename  = ""
 
     def _log(self, msg: str, color: Optional[LogColor] = None) -> None:
-        if self.log_area:
-            append_colored_text(self.log_area, msg, color)
+        self.log.emit(msg, color)
         try:
             self.siril.log(msg, color=color) if color else self.siril.log(msg)
         except Exception as exc:
@@ -460,6 +339,12 @@ class ProcessingThread(QThread):
     @property
     def _masters_dir(self) -> str:
         return os.path.normpath(os.path.join(self.workdir, "masters"))
+
+    @property
+    def _lights_dir(self) -> str:
+        if getattr(self, 'folder_structure', None) == "native":
+            return os.path.normpath(os.path.join(self.workdir, "01-images-initial"))
+        return os.path.normpath(os.path.join(self.workdir, "lights"))
 
     def _create_final_stack_dir(self) -> Path:
         final_dir = Path(self.workdir, "final_stack")
@@ -525,6 +410,201 @@ class ProcessingThread(QThread):
                 self._log(f"Could not delete final_stack: {exc}", LogColor.RED)
         return count
 
+    def _cleanup_sequence_prefix(self, folder: str, prefix: str) -> None:
+        """Remove intermediate sequence files."""
+        for pattern in (f"{prefix}_*.fits", f"{prefix}_*.fit",
+                        f"{prefix}_*.FITS", f"{prefix}_*.FIT", f"{prefix}.seq"):
+            for filepath in glob.glob(os.path.join(folder, pattern)):
+                try:
+                    os.remove(filepath)
+                except OSError as exc:
+                    self._log(f"Warning: could not remove {filepath}: {exc}", LogColor.SALMON)
+
+    def _find_best_frame(self, seq_name: str, process_dir: str) -> Optional[str]:
+        """Return the path of the frame with the most detected stars."""
+        self._log("Running SEQFINDSTAR to identify best frame", LogColor.BLUE)
+        try:
+            self.siril.cmd("seqfindstar", seq_name, "-maxstars=100")
+        except Exception as exc:
+            self._log(f"SEQFINDSTAR failed: {exc} — skipping best-frame selection",
+                      LogColor.SALMON)
+            return None
+
+        lst_files = sorted(glob.glob(os.path.join(process_dir, "cache", f"{seq_name}_*.lst")))
+        if not lst_files:
+            self._log("No .lst files found after SEQFINDSTAR — skipping best-frame selection",
+                      LogColor.SALMON)
+            return None
+
+        best_lst:   Optional[str] = None
+        best_count: int           = -1
+
+        for lst_path in lst_files:
+            try:
+                with open(lst_path, "r", encoding="utf-8", errors="replace") as fh:
+                    lines = fh.readlines()
+                star_count = sum(
+                    1 for ln in lines
+                    if ln.strip() and not ln.strip().startswith("#")
+                )
+                if star_count > best_count:
+                    best_count = star_count
+                    best_lst   = lst_path
+            except OSError as exc:
+                self._log(f"Could not read {lst_path}: {exc}", LogColor.SALMON)
+
+        for lst_path in lst_files:
+            try:
+                os.remove(lst_path)
+            except OSError as exc:
+                self._log(f"Warning: could not remove {lst_path}: {exc}", LogColor.SALMON)
+        self._log(f"Removed {len(lst_files)} .lst file(s) from cache/", LogColor.BLUE)
+
+        if best_lst is None or best_count <= 0:
+            self._log("All .lst files empty — skipping best-frame selection", LogColor.SALMON)
+            return None
+
+        lst_stem  = os.path.splitext(os.path.basename(best_lst))[0]
+        fits_path = os.path.join(process_dir, f"{lst_stem}.fits")
+        if not os.path.exists(fits_path):
+            fits_path = os.path.join(process_dir, f"{lst_stem}.fit")
+        if not os.path.exists(fits_path):
+            self._log(f"Best frame FITS not found for {lst_stem} — skipping best-frame selection",
+                      LogColor.SALMON)
+            return None
+
+        self._log(f"Best frame: {lst_stem}.fits  ({best_count} stars detected)", LogColor.BLUE)
+        return fits_path
+
+    def _blind_solve(self, file_path: str):
+        """Load file_path into Siril, run blind plate-solve, return (ra_deg, dec_deg)."""
+        try:
+            self.siril.cmd("load", f'"{file_path}"')
+            self.siril.cmd("platesolve", "-localasnet", "-blindpos")
+        except Exception as e:
+            self.siril.log(f"Could not plate solve the image: {e}", LogColor.SALMON)
+            self.siril.cmd("close")
+            return None
+        try:
+            header = self.siril.get_image_fits_header(return_as="dict")
+            if isinstance(header, dict):
+                ra  = header.get("RA",  0)
+                dec = header.get("DEC", 0)
+                return float(ra), float(dec)
+        except Exception as e:
+            self.siril.log(f"Could not read RA/DEC from header: {e}", LogColor.SALMON)
+        finally:
+            try:
+                self.siril.cmd("close")
+            except Exception:
+                pass
+        return None
+    
+    def _get_coordinates(self, lights_dir: str,
+                         seq_name:    Optional[str] = None,
+                         process_dir: Optional[str] = None) -> Optional[tuple]:
+        """Return (RA, DEC) in degrees via blind solve → SEQFINDSTAR → SIMBAD cascade."""
+        light_files = sorted(
+            f for f in os.listdir(lights_dir)
+            if f.lower().endswith((".fits", ".fit"))
+        )
+
+        if self.local_catalog_gaia_available:
+            # Step 1 — blind solve on first raw light
+            if light_files:
+                first_light = os.path.join(lights_dir, light_files[0])
+                self.siril.log(f"Blind solving first raw light: {light_files[0]}", LogColor.BLUE)
+                coords = self._blind_solve(first_light)
+                if coords:
+                    self.siril.log(f"Blind solve succeeded: RA={coords[0]:.6f}  DEC={coords[1]:.6f}",
+                                   LogColor.BLUE)
+                    return coords
+                self.siril.log("Blind solve failed — trying best frame", LogColor.SALMON)
+            else:
+                self.siril.log("No light files found — skipping blind solve", LogColor.SALMON)
+
+            # Step 2 — blind solve on best frame via SEQFINDSTAR
+            if seq_name and process_dir:
+                try:
+                    self.siril.cmd("cd", f'"{process_dir}"')
+                except Exception:
+                    pass
+                best_frame = self._find_best_frame(seq_name, process_dir)
+                if best_frame:
+                    self.siril.log(f"Blind solving best frame: {os.path.basename(best_frame)}",
+                                   LogColor.BLUE)
+                    coords = self._blind_solve(best_frame)
+                    if coords:
+                        self.siril.log(f"Blind solve succeeded: RA={coords[0]:.6f}  DEC={coords[1]:.6f}",
+                                       LogColor.BLUE)
+                        return coords
+                    self.siril.log("Blind solve failed on best frame — trying SIMBAD", LogColor.SALMON)
+                else:
+                    self.siril.log("Best-frame selection unavailable — trying SIMBAD", LogColor.SALMON)
+        else:
+            self.siril.log("Local Gaia catalogue not available — skipping blind solve, trying SIMBAD",
+                           LogColor.SALMON)
+
+        # Step 3 — SIMBAD via OBJECT header
+        if not light_files:
+            self.siril.log("Could not determine coordinates — plate solving will be skipped",
+                           LogColor.SALMON)
+            return None
+
+        try:
+            self.siril.cmd("load", f'"{os.path.join(lights_dir, light_files[0])}"')
+        except Exception as exc:
+            self._log(f"Could not load image for SIMBAD lookup: {exc}", LogColor.SALMON)
+            return None
+        try:
+            header_dict = self.siril.get_image_fits_header(return_as='dict')
+            obj_name = None
+            if isinstance(header_dict, dict):
+                obj_name = str(header_dict.get("OBJECT", "")).strip() or None
+            self.siril.cmd("close")
+            self.siril.cmd("cd", ".")
+        except Exception as e:
+            self._log(f"Could not read OBJECT header: {e}", LogColor.SALMON)
+            return None
+
+        if not obj_name:
+            self._log("No OBJECT header — cannot query SIMBAD", LogColor.SALMON)
+            return None
+
+        try:
+            base_url = "https://simbad.cds.unistra.fr/simbad/sim-id"
+            url = f"{base_url}?{urllib.parse.urlencode({'output.format': 'ASCII', 'Ident': obj_name})}"
+            with urllib.request.urlopen(url, timeout=30) as response:
+                data = response.read().decode("utf-8")
+
+            for line in data.splitlines():
+                if line.startswith("Coordinates(ICRS,ep=J2000,eq=2000):"):
+                    _, coord_part = line.split(":", 1)
+                    m = re.search(
+                        r"(\d+)\s+(\d+)\s+([\d.]+)\s+([+-]?\d+)\s+(\d+)\s+([\d.]+)",
+                        coord_part,
+                    )
+                    if not m:
+                        break
+                    ra_h, ra_m, ra_s, dec_d, dec_m, dec_s = m.groups()
+                    ra_deg  = 15.0 * (float(ra_h) + float(ra_m) / 60.0 + float(ra_s) / 3600.0)
+                    sign    = -1 if dec_d.strip().startswith("-") else 1
+                    dec_deg = sign * (abs(float(dec_d)) + float(dec_m) / 60.0 + float(dec_s) / 3600.0)
+                    self.siril.log(
+                        f"SIMBAD succeeded for '{obj_name}': RA={ra_deg:.6f}  DEC={dec_deg:.6f}",
+                        LogColor.BLUE,
+                    )
+                    return ra_deg, dec_deg
+
+            self.siril.log(f"SIMBAD returned no coordinates for '{obj_name}'", LogColor.SALMON)
+        except Exception as e:
+            self.siril.log(f"SIMBAD query error: {e}", LogColor.SALMON)
+
+        self.siril.log("Could not determine coordinates — plate solving will be skipped",
+                       LogColor.SALMON)
+        return None
+
+
     def _set_telescope_from_fits(self) -> None:
         if getattr(self, 'folder_structure', None) == "native":
             lights_dir = os.path.join(self.workdir, "01-images-initial")
@@ -542,12 +622,25 @@ class ProcessingThread(QThread):
             return
         first_file = os.path.join(lights_dir, fits_files[0])
         try:
-            with fits.open(first_file) as hdul:
-                naxis1 = hdul[0].header.get("NAXIS1", 0)
-                naxis2 = hdul[0].header.get("NAXIS2", 0)
+            self.siril.cmd("load", f'"{first_file}"')
+        except Exception as exc:
+            self.siril.log(f"Could not load FITS for telescope detection: {exc}", LogColor.SALMON)
+            return
+        try:
+            header_dict = self.siril.get_image_fits_header(return_as='dict')
+            naxis1 = 0
+            naxis2 = 0
+            if isinstance(header_dict, dict):
+                naxis1 = header_dict.get("NAXIS1", 0)
+                naxis2 = header_dict.get("NAXIS2", 0)
         except Exception as exc:
             self.siril.log(f"Error reading telescope from FITS: {exc}", LogColor.SALMON)
             return
+        finally:
+            try:
+                self.siril.cmd("close")
+            except Exception:
+                pass
         if naxis1 == 3536 and naxis2 == 3536:
             model = "Vespera Pro"
         elif naxis1 == 3840 and naxis2 == 2160:
@@ -556,6 +649,11 @@ class ProcessingThread(QThread):
             self.siril.log("Couldn't find telescope info, using defaults", LogColor.BLUE)
             return
         self.settings.update(TELESCOPES[model])
+        # Store native sensor dimensions for autocrop
+        sensor_dims = {"Vespera Pro": (3536, 3536), "Vespera II": (3840, 2160)}
+        w, h = sensor_dims[model]
+        self.settings["sensor_naxis1"] = w
+        self.settings["sensor_naxis2"] = h
         self._log(f"Set telescope to {model} from FITS header", LogColor.BLUE)
 
     def _process(self) -> None:
@@ -625,12 +723,12 @@ class ProcessingThread(QThread):
         self._log(f"Found {num_darks} dark(s), {num_lights} light(s)", LogColor.BLUE)
 
         # Cleanup
-        self.progress.emit(ProcessingProgress.CLEANUP, "Cleaning previous files...")
+        self.progress.emit(ProcessingProgress.CLEANUP, "Cleaning previous files")
         deleted = self._cleanup_folder(process_dir) + self._cleanup_folder(masters_dir)
         self._log(f"Cleaned {deleted} temp files", LogColor.BLUE)
 
         # Process darks
-        self.progress.emit(ProcessingProgress.DARK_PROCESSING, "Processing darks...")
+        self.progress.emit(ProcessingProgress.DARK_PROCESSING, "Processing darks")
         if self.folder_structure == "native":
             self._log("Single dark → using directly as master", LogColor.BLUE)
             if not self._run("load", f'"{dark_file}"'):
@@ -659,35 +757,14 @@ class ProcessingThread(QThread):
                     self.finished.emit(False, "Failed to save stacked dark")
                     return
             else:
-                self._log(f"Stacking {num_darks} darks...", LogColor.BLUE)
+                self._log(f"Stacking {num_darks} darks", LogColor.BLUE)
                 if not self._run("stack", "dark", "rej", str(sigma_lo), str(sigma_hi),
                                  "-nonorm", "-out=dark_stacked"):
                     self.finished.emit(False, "Failed to stack darks")
                     return
 
-        # Telescope detection
-        self._set_telescope_from_fits()
-
-        # SIMBAD coordinates + header enrichment
-        self.progress.emit(ProcessingProgress.LIGHT_CONVERSION, "Looking up target coordinates...")
-        try:
-            light_files = [f for f in os.listdir(lights_dir) if f.lower().endswith(('.fits', '.fit'))]
-            if light_files:
-                first_light = os.path.join(lights_dir, light_files[0])
-                with fits.open(first_light) as hdul:
-                    dso_name = str(hdul[0].header.get("OBJECT", "")).strip()
-                    if dso_name:
-                        solver = VesperaPlateSolver(self.siril)
-                        coords = solver._query_simbad_coordinates(dso_name)
-                        if coords:
-                            self.simbad_coordinates = coords
-                            self._log(f"Found SIMBAD coordinates for {dso_name}: RA={coords[0]:.6f} DEC={coords[1]:.6f}", LogColor.BLUE)
-                            self._enrich_fits_headers(lights_dir)
-        except Exception as exc:
-            self._log(f"Could not get SIMBAD coordinates: {exc}", LogColor.SALMON)
-
         # Convert lights
-        self.progress.emit(ProcessingProgress.LIGHT_CONVERSION, "Converting lights...")
+        self.progress.emit(ProcessingProgress.LIGHT_CONVERSION, "Converting lights")
         if not self._run("cd", "01-images-initial" if self.folder_structure == "native" else "../lights"):
             self.finished.emit(False, "Failed to enter lights directory")
             return
@@ -699,6 +776,9 @@ class ProcessingThread(QThread):
             return
         self.light_seq_name = "light"
 
+        # Telescope detection
+        self._set_telescope_from_fits()
+
         # Batch or standard processing
         if self.settings.get("batch_enabled"):
             self._process_batch_sessions(method, sigma_lo, sigma_hi)
@@ -707,7 +787,7 @@ class ProcessingThread(QThread):
 
         # Temp cleanup
         if self.settings.get("clean_temp"):
-            self.progress.emit(ProcessingProgress.TEMP_CLEANUP, "Cleaning up...")
+            self.progress.emit(ProcessingProgress.TEMP_CLEANUP, "Cleaning up")
             deleted = self._cleanup_folder(process_dir) + self._cleanup_folder(masters_dir)
             self._log(f"Cleaned {deleted} temp files", LogColor.BLUE)
 
@@ -719,36 +799,6 @@ class ProcessingThread(QThread):
         self.progress.emit(ProcessingProgress.COMPLETE, "Complete!")
         self.finished.emit(True, "Processing complete!")
 
-    def _enrich_fits_headers(self, lights_dir: str) -> None:
-        """Write RA, DEC, FOCALLEN, XPIXSZ, YPIXSZ, TELESCOP into every light FITS file."""
-        if not hasattr(self, 'simbad_coordinates'):
-            return
-        ra_deg, dec_deg = self.simbad_coordinates
-        focal_length    = self.settings.get('focal_length_mm', 250.0)
-        pixel_size      = self.settings.get('pixel_size_um', 2.0)
-        if not os.path.isdir(lights_dir):
-            self._log(f"_enrich_fits_headers: directory not found: {lights_dir}", LogColor.SALMON)
-            return
-        updated = 0
-        for fname in os.listdir(lights_dir):
-            if not fname.lower().endswith(('.fits', '.fit')):
-                continue
-            fpath = os.path.join(lights_dir, fname)
-            try:
-                with fits.open(fpath, mode='update') as hdul:
-                    hdr = hdul[0].header
-                    hdr['RA']       = (ra_deg,       'Image center Right Ascension [deg]')
-                    hdr['DEC']      = (dec_deg,      'Image center Declination [deg]')
-                    hdr['FOCALLEN'] = (focal_length,  'Focal length [mm]')
-                    hdr['XPIXSZ']   = (pixel_size,   'Pixel size X [um]')
-                    hdr['YPIXSZ']   = (pixel_size,   'Pixel size Y [um]')
-                    hdr['TELESCOP'] = ('Vespera Pro', 'Telescope model')
-                    hdul.flush()
-                updated += 1
-            except Exception as exc:
-                self._log(f"Could not update headers for {fname}: {exc}", LogColor.SALMON)
-        self._log(f"Enriched FITS headers in {updated} light frames", LogColor.BLUE)
-
     def _process_standard(
         self,
         method: Dict[str, Any],
@@ -756,9 +806,13 @@ class ProcessingThread(QThread):
         sigma_high: float,
         chunk_idx: Optional[int] = None,
         total_chunks: Optional[int] = None,
+        active_process_dir: Optional[str] = None,
     ) -> None:
         """Calibrate → (optional BGE) → Plate-solve → Register → Stack → Finalize."""
-        self.siril.cmd("close")  # fresh start
+        self.siril.cmd("close")
+        _apd = active_process_dir if active_process_dir is not None else self._process_dir
+        if active_process_dir is not None:
+            self._run("cd", f'"{active_process_dir}"')
 
         def _emit(stage_pct: float, msg: str) -> None:
             """Emit progress, optionally scaled to the current chunk's slice of the bar."""
@@ -773,30 +827,38 @@ class ProcessingThread(QThread):
         def _chunk_label(base: str) -> str:
             return f"{base} chunk {chunk_idx} of {total_chunks}" if chunk_idx else base
 
-        # -- Drizzle safeguards -------------------------------------------
-        if method.get("use_drizzle"):
-            warnings = []
-            if self.settings.get("stacking_method") == "Drizzle 2x Upscale":
-                if self.settings.get("two_pass"):
-                    self.settings["two_pass"] = False
-                    warnings.append("2-Pass Registration")
+        # -- Method-specific safeguards ------------------------------------
+        warnings = []
+        drizzle_scale = method.get("drizzle_scale", 1.0)
+
+        if not method.get("use_drizzle"):
             if self.settings.get("bge"):
                 self.settings["bge"] = False
                 warnings.append("BGE")
-            if warnings:
-                self._log(
-                    f"Drizzle: {' and '.join(warnings)} disabled "
-                    f"(incompatible — drizzle requires CFA input).",
-                    LogColor.SALMON,
-                )
+
+        if drizzle_scale and drizzle_scale > 1.0:
+            if self.settings.get("two_pass"):
+                self.settings["two_pass"] = False
+                warnings.append("2-Pass Registration")
+
+        if warnings:
+            self._log(
+                f"{'Standard Registration' if not method.get('use_drizzle') else 'Drizzle 2x Upscale'}: "
+                f"{' and '.join(warnings)} disabled "
+                f"({'Standard Registration debayers CFA input' if not method.get('use_drizzle') else 'incompatible with upscaled drizzle'}).",
+                LogColor.SALMON,
+            )
 
         # -- RICE 16 Compression (optional) --------------------------------
         if self.settings.get("use_compression"):
-            self.siril.cmd("setcompress", "1 -type=rice 16")
-            self._log("Using Rice 16 compression", LogColor.BLUE)
+            if self._run("setcompress", "1", "-type=rice", "16"):
+                self._log("Rice 16 compression enabled", LogColor.BLUE)
+            else:
+                self._log("setcompress failed — continuing without compression", LogColor.SALMON)
+                self.settings["use_compression"] = False
 
         # -- Calibration ---------------------------------------------------
-        _emit(ProcessingProgress.CALIBRATION, _chunk_label("Calibrating..."))
+        _emit(ProcessingProgress.CALIBRATION, _chunk_label("Calibrating"))
         try:
             self._calibrate(self.light_seq_name, method)
         except Exception as exc:
@@ -807,11 +869,12 @@ class ProcessingThread(QThread):
         stack_seq = f"r_pp_{self.light_seq_name}"
 
         # -- Background extraction (optional, pre-registration) ------------
- 
         if self.settings.get("bge"):
-            _emit(ProcessingProgress.BACKGROUND_EXTR, _chunk_label("Background Extraction..."))
+            _emit(ProcessingProgress.BACKGROUND_EXTR, _chunk_label("Background Extraction"))
             try:
                 self._run_background_extraction(seq_name=reg_input)
+                self._cleanup_sequence_prefix(_apd, f"pp_{self.light_seq_name}")
+                self._log(f"Flushed pp_{self.light_seq_name} sequences after BGE", LogColor.BLUE)
                 reg_input = f"bkg_pp_{self.light_seq_name}"
                 stack_seq = f"r_bkg_pp_{self.light_seq_name}"
             except Exception as exc:
@@ -821,23 +884,26 @@ class ProcessingThread(QThread):
                     LogColor.SALMON,
                 )
 
-        # -- Plate solving -------------------------------------------------
-        _emit(ProcessingProgress.PLATESOLVING, _chunk_label("Plate solving..."))
+        # -- Coordinate resolution + Plate solving -------------------------
+        _emit(ProcessingProgress.GET_COORDINATES, _chunk_label("Resolving coordinates"))
         plate_solve_ok = False
 
         if self.local_catalog_gaia_available:
             try:
+                self.simbad_coordinates = self._get_coordinates(
+                    lights_dir  = self._lights_dir,
+                    seq_name    = reg_input,
+                    process_dir = _apd,
+                )
+                _emit(ProcessingProgress.PLATESOLVING, _chunk_label("Plate solving"))
                 plate_solve_ok = self._seq_plate_solve(reg_input)
             except Exception as exc:
                 self._log(f"Plate solving error: {exc}", LogColor.SALMON)
         else:
-            if not self.local_catalog_gaia_available:
-                self._log("Local Gaia catalogue not available — using regular registration.", LogColor.SALMON)
-            else:
-                self._log("No SIMBAD coordinates — skipping plate solve.", LogColor.SALMON)
+            self._log("Local Gaia catalogue not available — using regular registration.", LogColor.SALMON)
 
         # -- Registration --------------------------------------------------
-        _emit(ProcessingProgress.REGISTRATION, _chunk_label("Registering..."))
+        _emit(ProcessingProgress.REGISTRATION, _chunk_label("Registering"))
         try:
             if plate_solve_ok:
                 self._seq_apply_reg(reg_input, method)
@@ -847,13 +913,30 @@ class ProcessingThread(QThread):
             self._log(f"Registration failed{f' for chunk {chunk_idx}' if chunk_idx else ''}: {exc}", LogColor.SALMON)
             return
 
+        # -- Pre-stacking sequence flush ------------------------------------
+        use_drizzle = method.get("use_drizzle", False)
+        if use_drizzle:
+            self._cleanup_sequence_prefix(_apd, self.light_seq_name)
+            self._cleanup_sequence_prefix(_apd, f"pp_{self.light_seq_name}")
+            self._log(
+                f"Flushed {self.light_seq_name} and pp_{self.light_seq_name} sequences before drizzle stack",
+                LogColor.BLUE,
+            )
+        else:
+            self._cleanup_sequence_prefix(_apd, self.light_seq_name)
+            if self.settings.get("bge"):
+                self._cleanup_sequence_prefix(_apd, f"bkg_pp_{self.light_seq_name}")
+            else:
+                self._cleanup_sequence_prefix(_apd, f"pp_{self.light_seq_name}")
+            self._log("Flushed pre-registration sequences before stacking", LogColor.BLUE)
+
         # -- Unset RICE 16 before stacking ---------------------------------
         if self.settings.get("use_compression"):
-            self.siril.cmd("setcompress", "0")
-            self._log("Unsetting Rice 16 compression before stacking", LogColor.BLUE)
+            self._run("setcompress", "0")
+            self._log("Rice 16 compression disabled before stacking", LogColor.BLUE)
 
         # -- Stacking ------------------------------------------------------
-        _emit(ProcessingProgress.STACKING, _chunk_label("Stacking..."))
+        _emit(ProcessingProgress.STACKING, _chunk_label("Stacking"))
         try:
             self._stack(stack_seq, sigma_low, sigma_high, "result")
         except Exception as exc:
@@ -861,15 +944,17 @@ class ProcessingThread(QThread):
             return
 
         # -- Finalization --------------------------------------------------
-        _emit(ProcessingProgress.FINALIZATION, _chunk_label("Finalizing..."))
+        _emit(ProcessingProgress.FINALIZATION, _chunk_label("Finalizing"))
+        if chunk_idx is not None:
+            self._run("setcompress", "0")
+            return
         try:
             self._finalize()
         except Exception as exc:
             self._log(f"Finalization failed{f' for chunk {chunk_idx}' if chunk_idx else ''}: {exc}", LogColor.SALMON)
 
     def _calibrate(self, seq_name: str, stack_method: Dict[str, Any]) -> None:
-        """Calibrate images with dark frame.
-        """
+        """Calibrate images with dark frame."""
         master_dark = (
             "../../../masters/dark_stacked"
             if self.settings.get("batch_enabled")
@@ -891,10 +976,12 @@ class ProcessingThread(QThread):
 
         cmd = ["register", seq_name]
         if use_drizzle:
+            kernel = stack_method.get("drizzle_kernel", "square")
             cmd += [
                 "-drizzle",
                 f"-scale={drizzle_scale}",
                 f"-pixfrac={stack_method.get('drizzle_pixfrac', 1.0)}",
+                f"-kernel={kernel}",
             ]
         if two_pass and (not use_drizzle or drizzle_scale == 1.0):
             cmd.append("-2pass")
@@ -904,19 +991,20 @@ class ProcessingThread(QThread):
             raise RuntimeError("Regular registration failed")
 
     def _seq_apply_reg(self, seq_name: str, stack_method: Dict[str, Any]) -> None:
-        """Apply pre-computed plate-solve registration via seqapplyreg.
-        """
+        """Apply pre-computed plate-solve registration via seqapplyreg."""
         use_drizzle   = stack_method.get("use_drizzle", False)
         drizzle_scale = stack_method.get("drizzle_scale", 1.0)
 
         framing = "-framing=max" if use_drizzle else "-framing=cog"
 
-        cmd = ["seqapplyreg", seq_name, "-kernel=square", framing]
+        cmd = ["seqapplyreg", seq_name, framing]
         if use_drizzle:
+            kernel = stack_method.get("drizzle_kernel", "square")
             cmd += [
                 "-drizzle",
                 f"-scale={drizzle_scale}",
                 f"-pixfrac={stack_method.get('drizzle_pixfrac', 1.0)}",
+                f"-kernel={kernel}",
             ]
 
         try:
@@ -928,12 +1016,17 @@ class ProcessingThread(QThread):
 
     def _stack(self, seq_name: str, sigma_low: float, sigma_high: float, output_name: str) -> None:
         """Stack images."""
-        has_registration = "r_pp_" in seq_name
+        has_registration = "r_pp_" in seq_name or "r_bkg_pp_" in seq_name
         weight = "-weight=wfwhm" if has_registration else "-weight=noise"
+
+        use_drizzle = STACKING_METHODS.get(
+            self.settings.get("stacking_method", ""), {}
+        ).get("use_drizzle", False)
+        rej_algo = "mad" if use_drizzle else "winsorized"
 
         cmd = [
             "stack", seq_name,
-            "rej", str(sigma_low), str(sigma_high),
+            "rej", rej_algo, str(sigma_low), str(sigma_high),
             "-norm=addscale", "-output_norm",
             weight, "-maximize"
         ]
@@ -945,7 +1038,7 @@ class ProcessingThread(QThread):
 
         self.siril.log(" ".join(cmd), LogColor.BLUE)
         if not self._run(*cmd):
-            raise RuntimeError("Stacking failed")
+            raise RuntimeError("Stacking failed — check available memory")
 
     def _finalize(self) -> None:
         """Finalize the stacked image."""
@@ -1003,17 +1096,22 @@ class ProcessingThread(QThread):
 
     def _run_background_extraction(self, seq_name: Optional[str] = None) -> None:
         """Extract background from images."""
-        if seq_name:
-            cmd = [
-                "seqsubsky", seq_name,
-                "1",
-                "-samples=40",
-            ]
+        use_drizzle = STACKING_METHODS.get(
+            self.settings.get("stacking_method", ""), {}
+        ).get("use_drizzle", False)
+
+        if use_drizzle:
+            algo = ["1"]
+            self._log("BGE: linear polynomial (degree 1) — Drizzle / CFA mode", LogColor.BLUE)
         else:
-            cmd = [
-                "subsky", "1", 
-                "-samples=40", 
-            ]
+            algo = ["-rbf", "-smooth=0.5"]
+            self._log("BGE: RBF smoothing=0.5 — Standard Registration mode", LogColor.BLUE)
+
+        if seq_name:
+            cmd = ["seqsubsky", seq_name] + algo + ["-samples=40"]
+        else:
+            cmd = ["subsky"] + algo + ["-samples=40"]
+
         self.siril.log(" ".join(cmd), LogColor.BLUE)
         if not self._run(*cmd):
             raise RuntimeError("Background Extraction failed")
@@ -1075,7 +1173,8 @@ class ProcessingThread(QThread):
                 self._log(f"  Processing chunk {idx} of {total_chunks}", LogColor.BLUE)
                 self._log("─" * 48, LogColor.BLUE)
                 self._process_standard(intermediate_method, sigma_low, sigma_high,
-                                       chunk_idx=idx, total_chunks=total_chunks)
+                                       chunk_idx=idx, total_chunks=total_chunks,
+                                       active_process_dir=str(sess / "process"))
             except Exception as exc:
                 self._log(f"Chunk {idx} failed: {exc}", LogColor.RED)
                 continue
@@ -1089,8 +1188,9 @@ class ProcessingThread(QThread):
             else:
                 self._log(f"No result file for {sess.name}", LogColor.SALMON)
             self._cleanup_folder(sess / "process")
+            self.siril.cmd("close")
         self.settings.update(saved)
-        self.progress.emit(ProcessingProgress.FINALIZATION, "Finalizing batch...")
+        self.progress.emit(ProcessingProgress.FINALIZATION, "Finalizing batch")
         try:
             self._stack_final(stack_method)
         except Exception as exc:
@@ -1112,17 +1212,20 @@ class ProcessingThread(QThread):
             return
 
         if len(chunk_files) == 1:
-            final_out = Path(self.workdir) / "final_stacked_batch.fit"
             try:
-                shutil.copy2(str(chunk_files[0]), str(final_out))
+                self.siril.cmd("cd", f'"{str(final_dir)}"')
+                self.siril.cmd("load", chunk_files[0].name)
                 self.final_filename = self._build_filename(None, batch=True)
+                self.siril.cmd("close")
+
+                resolved = Path(self.workdir) / self.final_filename
+                shutil.move(str(chunk_files[0]), str(resolved))
                 self._log(f"Single chunk — promoted directly to {self.final_filename}", LogColor.BLUE)
             except Exception as exc:
                 self._log(f"Could not promote single chunk: {exc}", LogColor.RED)
             return
 
         use_drizzle = stack_method.get("use_drizzle", False)
-
         framing = "-framing=max" if use_drizzle else "-framing=cog"
 
         try:
@@ -1150,34 +1253,52 @@ class ProcessingThread(QThread):
                     self._log(f"Final sequence plate solve failed (non-fatal): {exc}", LogColor.SALMON)
 
             if plate_solve_ok:
-                reg_cmd = ["seqapplyreg", "pp_session", "-kernel=square", framing]
+                reg_cmd = ["seqapplyreg", "pp_session", framing]
+                if use_drizzle:
+                    kernel = stack_method.get("drizzle_kernel", "square")
+                    reg_cmd += ["-drizzle",
+                                f"-scale={stack_method.get('drizzle_scale', 1.0)}",
+                                f"-pixfrac={stack_method.get('drizzle_pixfrac', 1.0)}",
+                                f"-kernel={kernel}"]
                 if not self._run(*reg_cmd):
                     self._log("Registration failed – skipping final stack", LogColor.SALMON)
                     return
                 if self.settings.get("two_pass"):
-                    if not self._run("seqapplyreg", "pp_session", "-kernel=square", framing):
+                    if not self._run(*reg_cmd):
                         raise RuntimeError("2-pass registration failed for final stack")
             else:
                 # No plate solve — fall back to regular registration.
                 reg_cmd = ["register", "pp_session"]
+                if use_drizzle:
+                    kernel = stack_method.get("drizzle_kernel", "square")
+                    reg_cmd += ["-drizzle",
+                                f"-scale={stack_method.get('drizzle_scale', 1.0)}",
+                                f"-pixfrac={stack_method.get('drizzle_pixfrac', 1.0)}",
+                                f"-kernel={kernel}"]
                 if self.settings.get("two_pass") and not use_drizzle:
                     reg_cmd.append("-2pass")
                 if not self._run(*reg_cmd):
                     self._log("Registration failed – skipping final stack", LogColor.SALMON)
                     return
 
-            stack_cmd = ["stack", "r_pp_session", "rej", "3", "3",
+            sky      = SKY_PRESETS.get(self.settings.get("sky_quality", ""), {})
+            sigma_lo = sky.get("sigma_low",  2.8)
+            sigma_hi = sky.get("sigma_high", 3.2)
+            rej_algo = "mad" if use_drizzle else "winsorized"
+            stack_cmd = ["stack", "r_pp_session", "rej", rej_algo, str(sigma_lo), str(sigma_hi),
                          "-norm=addscale", "-output_norm", "-weight=wfwhm", "-maximize",
                          "-out=final_stacked_batch.fit"]
             if not self._run(*stack_cmd):
                 self._log("Stacking failed – final stack incomplete", LogColor.SALMON)
                 return
 
-            final_out = Path(self.workdir) / "final_stacked_batch.fit"
-            shutil.move(str(process_dir / "final_stacked_batch.fit"), str(final_out))
+
             self.final_filename = self._build_filename(None, batch=True)
+            self.siril.cmd("close")
+
+            resolved = Path(self.workdir) / self.final_filename
+            shutil.move(str(process_dir / "final_stacked_batch.fit"), str(resolved))
             self._log(f"Final stacked image written to {self.final_filename}", LogColor.BLUE)
-            self.siril.cmd("cd", "../../..")
         except Exception as exc:
             self._log(f"Final stack failed: {exc}", LogColor.SALMON)
     
@@ -1209,18 +1330,112 @@ class ProcessingThread(QThread):
         except Exception as exc:
             self._log(f"Auto-stretch failed: {exc}", LogColor.SALMON)
 
+    def _run_autocrop(self) -> None:
+        """Centre-crop the stack to native sensor size, removing Drizzle rotation padding."""
+        method_name = self.settings.get("stacking_method", "")
+        use_drizzle = STACKING_METHODS.get(method_name, {}).get("use_drizzle", False)
+        is_2x = "Drizzle 2x Upscale" in method_name
+
+        if not use_drizzle:
+            self._log("Autocrop skipped — Standard Registration output is already native size.",
+                      LogColor.SALMON)
+            return
+
+        # ── Resolve native sensor dimensions ────────────────────────────────
+        native_w = int(self.settings.get("sensor_naxis1", 0))
+        native_h = int(self.settings.get("sensor_naxis2", 0))
+
+        if not (native_w and native_h):
+            sensor_name = self.settings.get("spcc_sensor", "")
+            for model, specs in TELESCOPES.items():
+                if specs.get("spcc_sensor") == sensor_name:
+                    if model == "Vespera Pro":
+                        native_w, native_h = 3536, 3536
+                    elif model == "Vespera II":
+                        native_w, native_h = 3840, 2160
+                    break
+
+        if not (native_w and native_h):
+            native_w, native_h = 3840, 2160
+            self._log(
+                f"Autocrop: sensor size unknown — falling back to Vespera II default "
+                f"({native_w} × {native_h}).",
+                LogColor.SALMON,
+            )
+
+        if is_2x:
+            target_w, target_h = native_w * 2, native_h * 2
+            self._log(
+                f"Autocrop: Drizzle 2× Upscale — cropping to 2× sensor size "
+                f"({target_w} × {target_h}).",
+                LogColor.BLUE,
+            )
+        else:
+            target_w, target_h = native_w, native_h
+
+        # ── Read current image dimensions from FITS header ───────────────────
+        try:
+            header = self.siril.get_image_fits_header(return_as="dict")
+            if isinstance(header, dict):
+                current_w = int(header.get("NAXIS1", 0))
+                current_h = int(header.get("NAXIS2", 0))
+            else:
+                current_w = current_h = 0
+        except Exception as exc:
+            self._log(f"Autocrop: could not read image dimensions — {exc}", LogColor.RED)
+            return
+
+        if not (current_w and current_h):
+            self._log("Autocrop: image dimensions unavailable — skipping.", LogColor.SALMON)
+            return
+
+        if current_w < target_w or current_h < target_h:
+            self._log(
+                f"Autocrop: stacked image ({current_w} × {current_h}) is already smaller "
+                f"than sensor ({target_w} × {target_h}) — skipping.",
+                LogColor.SALMON,
+            )
+            return
+
+        if current_w == target_w and current_h == target_h:
+            self._log(
+                "Autocrop: stacked image already matches sensor size — nothing to do.",
+                LogColor.BLUE,
+            )
+            return
+
+        # ── Compute centred crop origin ───────────────────────────────────────
+        x = (current_w - target_w) // 2
+        y = (current_h - target_h) // 2
+
+        self._log(
+            f"Autocrop: {current_w} × {current_h}  →  {target_w} × {target_h} "
+            f"(offset {x}, {y})",
+            LogColor.BLUE,
+        )
+        if not self._run("crop", str(x), str(y), str(target_w), str(target_h)):
+            self._log("Autocrop: crop command failed.", LogColor.RED)
+
+    def _run_denoise(self) -> None:
+        """Apply NL-Bayes denoising with automatic cosmetic correction."""
+        if not self._run("denoise", "-indep"):
+            self._log("Denoise failed", LogColor.SALMON)
+
     def _run_poststacking(self) -> None:
         """Run all post-stacking operations with per-step progress."""
         total_steps  = max(sum([
             bool(self.settings.get("spcc")),
             bool(self.settings.get("autostretch")),
+            bool(self.settings.get("autocrop")),
+            bool(self.settings.get("denoise")),
         ]), 1)
         current_step = 0
 
         try:
             if self.settings.get("batch_enabled"):
                 self.siril.cmd("cd", f'"{self.workdir}"')
-                if not self._run("load", "final_stacked_batch.fit"):
+                load_name = self.final_filename if self.final_filename else "final_stacked_batch.fit"
+                if not self._run("load", load_name):
                     return
             else:
                 self.siril.cmd("cd", f'"{self.workdir}"')
@@ -1238,7 +1453,7 @@ class ProcessingThread(QThread):
         if self.settings.get("spcc"):
             current_step += 1
             self.progress.emit(
-                int(current_step / total_steps * 100), "Plate solving..."
+                int(current_step / total_steps * 100), "Plate solving"
             )
             if hasattr(self, "simbad_coordinates"):
                 ra_deg, dec_deg = self.simbad_coordinates
@@ -1271,18 +1486,37 @@ class ProcessingThread(QThread):
             if plate_solve_ok:
                 current_step += 1
                 self.progress.emit(
-                    int(current_step / total_steps * 100), "Color calibrating..."
+                    int(current_step / total_steps * 100), "Color calibrating"
                 )
                 self._run_spcc()
             else:
                 self.siril.log("Plate solving failed – skipping SPCC", LogColor.SALMON)
 
+        if self.settings.get("denoise"):
+            current_step += 1
+            self.progress.emit(
+                int(current_step / total_steps * 100), "Denoising"
+            )
+            self._run_denoise()
+
         if self.settings.get("autostretch"):
             current_step += 1
             self.progress.emit(
-                int(current_step / total_steps * 100), "Auto‑stretching..."
+                int(current_step / total_steps * 100), "Auto‑stretching"
             )
             self._run_autostretch()
+
+        if self.settings.get("autocrop"):
+            current_step += 1
+            self.progress.emit(
+                int(current_step / total_steps * 100), "Cropping to sensor size"
+            )
+            self._run_autocrop()
+
+        if self.settings.get("spcc") or self.settings.get("autostretch") or self.settings.get("autocrop") or self.settings.get("denoise"):
+            save_name = Path(self.workdir) / (self.final_filename or "final_stacked_batch.fit")
+            self._run("icc_remove")
+            self._run("save", f'"{save_name.with_suffix("")}"')
 
     def _log_summary(self, elapsed_sec: float) -> None:
         """Log processing summary."""
@@ -1293,13 +1527,17 @@ class ProcessingThread(QThread):
         self._log("─" * 48, LogColor.BLUE)
         self._log(f"  Sky Quality    : {s.get('sky_quality', '—')}", LogColor.BLUE)
         self._log(f"  Method         : {s.get('stacking_method', '—')}", LogColor.BLUE)
-        self._log(f"  BGE            : {'Yes' if s.get('bge') else 'No'}", LogColor.BLUE)
+        use_drizzle = STACKING_METHODS.get(s.get("stacking_method", ""), {}).get("use_drizzle", False)
+        bge_algo = "linear deg.1" if use_drizzle else "RBF 50%"
+        self._log(f"  BGE            : {'Yes (' + bge_algo + ')' if s.get('bge') else 'No'}", LogColor.BLUE)
         self._log(f"  2-Pass         : {'Yes' if s.get('two_pass') else 'No'}", LogColor.BLUE)
         self._log(f"  Compression    : {'Yes' if s.get('use_compression') else 'No'}", LogColor.BLUE)
         self._log(f"  Feathering     : {s.get('feather_px', 0)} px" if s.get('feather_enabled') else "  Feathering     : No", LogColor.BLUE)
         self._log(f"  Batch          : {'Yes — ' + str(s.get('batch_size')) + ' img/chunk' if s.get('batch_enabled') else 'No'}", LogColor.BLUE)
         self._log(f"  SPCC           : {'Yes (' + s.get('spcc_filter', 'No Filter') + ')' if s.get('spcc') else 'No'}", LogColor.BLUE)
         self._log(f"  Auto-Stretch   : {'Yes' if s.get('autostretch') else 'No'}", LogColor.BLUE)
+        self._log(f"  Autocrop       : {'Yes' if s.get('autocrop') else 'No'}", LogColor.BLUE)
+        self._log(f"  Denoise        : {'Yes' if s.get('denoise') else 'No'}", LogColor.BLUE)
         self._log(f"  Output         : {self.final_filename or 'final_stacked_batch.fit'}", LogColor.BLUE)
         self._log(f"  Processing Time: {mins}m {secs:02d}s", LogColor.GREEN)
         self._log("─" * 48, LogColor.BLUE)
@@ -1313,21 +1551,39 @@ class ProcessingThread(QThread):
 
     def _build_filename(self, exposure: Optional[Any], batch: bool = False) -> str:
         """Build output filename from active settings."""
-        s  = self.settings
+        s = self.settings
         ts = datetime.now().strftime("%H%M")
         parts: List[str] = []
 
-        if batch:
-            parts.append("batch")
+        obj_name = None
+        try:
+            header_dict = self.siril.get_image_fits_header(return_as='dict')
+            if isinstance(header_dict, dict):
+                obj_name = str(header_dict.get("OBJECT", "")).strip() or None
+        except Exception:
+            pass
+        self._log(f"Output filename — OBJECT header: {obj_name!r}", LogColor.BLUE)
+
+        if isinstance(obj_name, str) and obj_name.strip():
+            base = re.sub(r"[^\w\-]", "", obj_name.strip().replace(" ", "_"))
+            if not base:
+                base = "result"
+        else:
+            base = "result"
+
         if exposure is not None:
             try:
                 parts.append(f"{int(float(exposure))}s")
             except (ValueError, TypeError):
                 pass
+
         if s.get("bge"):
             parts.append("bge")
         if s.get("two_pass"):
             parts.append("2pass")
+        drizzle_scale = STACKING_METHODS.get(s.get("stacking_method", ""), {}).get("drizzle_scale", 1.0)
+        if drizzle_scale and drizzle_scale > 1.0:
+            parts.append(f"drz{drizzle_scale:.0f}x")
         if s.get("use_compression"):
             parts.append("rice")
         if s.get("feather_enabled") and s.get("feather_px", 0) > 0:
@@ -1340,9 +1596,14 @@ class ProcessingThread(QThread):
             parts.append(filter_tag)
         if s.get("autostretch"):
             parts.append("stretch")
+        if s.get("autocrop"):
+            parts.append("crop")
+        if s.get("denoise"):
+            parts.append("denoise")
 
         suffix = ("_" + "_".join(parts)) if parts else ""
-        return f"result{suffix}_{ts}.fit"
+
+        return f"{base}{suffix}_{ts}.fit"
 
 # ---------------------------------------------------------------------------
 # GUI
@@ -1356,13 +1617,19 @@ class VesperaProGUI(QDialog):
         self.app = app
         self.worker: Optional[ProcessingThread] = None
         self.workdir = ""
+        self._spinner_frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+        self._spinner_idx    = 0
+        self._spinner_base   = ""
+        self._spinner_timer  = QTimer(self)
+        self._spinner_timer.setInterval(100)
+        self._spinner_timer.timeout.connect(self._tick_spinner)
 
         import json
         self._settings_file = Path(os.path.expanduser("~")) / ".vespera_preprocessing.json"
         self.current_settings: Dict[str, Any] = {}
         self.folder_structure: Optional[str] = None
 
-        self.setFixedSize(560, 830)
+        self.setFixedSize(560, 860)
         self.setWindowTitle(f"Vespera — Preprocessing v{VERSION}")
         self.setStyleSheet(DARK_STYLESHEET)
 
@@ -1385,7 +1652,7 @@ class VesperaProGUI(QDialog):
         self._set_gui_enabled(False)
         self.btn_start.setEnabled(False)
         self.progress.setValue(0)
-        self.status.setText("Processing...")
+        self.status.setText("Processing")
         self.status.setStyleSheet("color: #ffcc44;")
         self.log_area.clear()
 
@@ -1419,7 +1686,6 @@ class VesperaProGUI(QDialog):
                 self.folder_structure,
                 self.local_catalog_gaia_available,
             )
-            self.worker.log_area = self.log_area
             self.worker.progress.connect(self._on_progress)
             self.worker.finished.connect(self._on_finished)
             self.worker.log.connect(self._log)
@@ -1430,14 +1696,28 @@ class VesperaProGUI(QDialog):
             self._set_gui_enabled(True)
             self.btn_start.setEnabled(True)
 
+
+    _LONG_STEPS = (
+        "Calibrat", "Background Extract", "Resolving coord",
+        "Plate solv", "Registering", "Stacking", "Finalizing",
+    )
+
     def _on_progress(self, percent: int, message: str) -> None:
-        """Update progress bar and status."""
+        """Update progress bar and status; spin on long steps."""
         self.progress.setValue(percent)
-        self.status.setText(message)
+        is_long = any(kw in message for kw in self._LONG_STEPS)
+        if is_long:
+            if not self._spinner_timer.isActive():
+                self._start_spinner(message)
+            else:
+                self._spinner_base = message
+        else:
+            self._stop_spinner(percent, message)
         QApplication.processEvents()  # Keep GUI responsive
 
     def _on_finished(self, success: bool, message: str) -> None:
         """Handle processing completion."""
+        self._stop_spinner(100, "")
         self._set_gui_enabled(True)
         self.btn_start.setEnabled(True)
         if hasattr(self, "worker") and self.worker:
@@ -1481,6 +1761,25 @@ class VesperaProGUI(QDialog):
             f"Chunks: {getattr(self, 'num_chunks', 1)}"
         )
     
+    def _tick_spinner(self) -> None:
+        """Advance the spinner one frame."""
+        self._spinner_idx = (self._spinner_idx + 1) % len(self._spinner_frames)
+        frame = self._spinner_frames[self._spinner_idx]
+        self.status.setText(f"{self._spinner_base}  {frame}")
+
+    def _start_spinner(self, base_msg: str) -> None:
+        """Start braille spinner on status label."""
+        self._spinner_base = base_msg
+        self._spinner_idx  = 0
+        self.status.setText(base_msg)
+        self._spinner_timer.start()
+
+    def _stop_spinner(self, percent: int, msg: str) -> None:
+        """Stop spinner and update status label."""
+        self._spinner_timer.stop()
+        self.progress.setValue(percent)
+        self.status.setText(msg)
+
     def _log(self, msg: str, color: Optional[LogColor] = None) -> None:
         if self.log_area:
             append_colored_text(self.log_area, msg, color)
@@ -1503,6 +1802,8 @@ class VesperaProGUI(QDialog):
         self.chk_batch.setEnabled(enabled)
         self.spcc_cb.setEnabled(enabled)
         self.autostretch_cb.setEnabled(enabled)
+        self.autocrop_cb.setEnabled(enabled)
+        self.denoise_cb.setEnabled(enabled)
         
         # Spinboxes
         self.feather_slider.setEnabled(enabled)
@@ -1631,12 +1932,12 @@ class VesperaProGUI(QDialog):
 
         left_col = QVBoxLayout()
         self.chk_compression = QCheckBox("RICE 16 Compression")
-        self.chk_compression.setToolTip("Apply Rice 16-bit lossless compression...")
+        self.chk_compression.setToolTip("Lossless Rice 16-bit compression on intermediate files. Disabled automatically before stacking.")
         left_col.addWidget(self.chk_compression)
 
         right_col = QVBoxLayout()
         self.chk_clean_temp = QCheckBox("Clean Temp Files")
-        self.chk_clean_temp.setToolTip("Delete process/ masters/ final_stack/...")
+        self.chk_clean_temp.setToolTip("Delete process/, masters/ and final_stack/ after completion. Verify result first.")
         right_col.addWidget(self.chk_clean_temp)
 
         chk_row.addLayout(left_col)
@@ -1689,16 +1990,16 @@ class VesperaProGUI(QDialog):
 
         self.chk_bg_extract = QCheckBox("Background Extraction")
         self.chk_bg_extract.setToolTip(
-            "Background subtraction on calibrated debayered frames, before registration.\n"
-            "⚠ Incompatible with all Drizzle methods (drizzle requires CFA input).\n"
-            "Only available with Standard Registration."
+            "Subtract sky background before registration.\n"
+            "Drizzle: linear polynomial (degree 1) on CFA input.\n"
+            "Standard Registration: unavailable (CFA pattern lost after debayer)."
         )
         left_col.addWidget(self.chk_bg_extract)
 
         self.chk_two_pass = QCheckBox("2-Pass Registration")
         self.chk_two_pass.setToolTip(
-            "Second alignment pass with -framing=max for sessions\n"
-            "with significant field rotation. Needs ≥50 frames/chunk."
+            "Two-pass registration: selects best reference frame before aligning.\n"
+            "Valid for all methods except Drizzle 2× Upscale."
         )
         left_col.addWidget(self.chk_two_pass)
 
@@ -1721,8 +2022,8 @@ class VesperaProGUI(QDialog):
             "Min recommended: 20 frames/chunk."
         )
         self.spin_batch_size = QSpinBox()
-        self.spin_batch_size.setRange(10, 100)
-        self.spin_batch_size.setValue(100)
+        self.spin_batch_size.setRange(20, 2048)
+        self.spin_batch_size.setValue(200)
         self.spin_batch_size.setSuffix(" img")
         self.spin_batch_size.setFixedWidth(82)
         batch_row.addWidget(self.chk_batch)
@@ -1743,8 +2044,21 @@ class VesperaProGUI(QDialog):
         post_opts_row.setSpacing(20)
 
         left_col = QVBoxLayout()
-        self.autostretch_cb = QCheckBox("Autostretch")
-        left_col.addWidget(self.autostretch_cb)
+        self.denoise_cb = QCheckBox("Denoise")
+        self.denoise_cb.setToolTip(
+            "Apply NL-Bayes denoising with automatic cosmetic correction.\n"
+            "Run on linear data, before Autostretch and Autocrop."
+        )
+        left_col.addWidget(self.denoise_cb)
+
+        self.autocrop_cb = QCheckBox("Autocrop to sensor size")
+        self.autocrop_cb.setToolTip(
+            "Centre-crop the stack back to sensor size after Drizzle.\n"
+            "Drizzle: crops to native sensor size.\n"
+            "Drizzle 2× Upscale: crops to 2× sensor size (preserves resolution gain).\n"
+            "No effect with Standard Registration."
+        )
+        left_col.addWidget(self.autocrop_cb)
 
         right_col = QVBoxLayout()
         spcc_row = QHBoxLayout()
@@ -1756,6 +2070,9 @@ class VesperaProGUI(QDialog):
         spcc_row.addWidget(self.spcc_cb)
         spcc_row.addWidget(self.spcc_filter_combo)
         right_col.addLayout(spcc_row)
+
+        self.autostretch_cb = QCheckBox("Autostretch")
+        right_col.addWidget(self.autostretch_cb)
 
         post_opts_row.addLayout(left_col)
         post_opts_row.addLayout(right_col)
@@ -1799,42 +2116,14 @@ class VesperaProGUI(QDialog):
         container_layout.addWidget(make_section(
             "Quick Start",
             """
-            <p><b>No Setup Required.</b> Point the plugin at your Vespera observation
-            folder and press <b>Run Pipeline</b>. Folder layout and telescope model are
-            auto-detected from FITS headers.</p>
-            <ul style="margin-left:14px;">
-              <li><b>Organised:</b> <code>darks/</code> &amp; <code>lights/</code> sub-folders.</li>
-              <li><b>Native Vespera:</b> <code>01-images-initial/</code> + <code>*-dark.fits</code>
-                  in root — single dark frame used directly as master.</li>
-              <li><b>Flat:</b> all FITS in one folder — dark frames matched by name pattern
-                  and reorganised automatically into <code>darks/</code> / <code>lights/</code>.</li>
-            </ul>
-            <p>Output: <code>result_<i>exposure</i>s.fit</code> in the working directory
-            (or <code>final_stacked_batch.fit</code> in batch mode).</p>
-            """
-        ))
-
-        container_layout.addWidget(make_section(
-            "Pipeline Order",
-            """
-            <ol style="margin-left:16px; line-height: 1.7em;">
-              <li>Clean previous intermediate files <i>(if enabled)</i></li>
-              <li>Build master dark — stack multiple darks, or use single dark directly</li>
-              <li>Auto-detect telescope model from FITS dimensions (NAXIS1/NAXIS2)</li>
-              <li>Convert light frames to sequence</li>
-              <li>Enable RICE 16 compression on intermediates <i>(if enabled)</i></li>
-              <li>Calibrate — dark subtraction + CFA equalization + debayer (Standard Reg) or CFA-only (Drizzle)</li>
-              <li>Background extraction on calibrated debayered frames <i>(Standard Registration only, if enabled)</i></li>
-              <li>Register — 1-pass or 2-pass with framing</li>
-              <li>Disable RICE 16 compression before stacking</li>
-              <li>Stack — sigma-clip, additive scaling, FWHM weighting, optional feathering</li>
-              <li><i>Batch mode:</i> repeat steps 5–10 per chunk → combine chunk results
-                  with a final registration + stack (fixed σ 3.0/3.5)</li>
-              <li>Plate solve via SIMBAD OBJECT header <i>(if SPCC enabled)</i></li>
-              <li>SPCC colour calibration <i>(if plate-solve succeeded)</i></li>
-              <li>Auto-stretch <i>(if enabled)</i></li>
-              <li>Clean temp files <i>(if enabled)</i></li>
-            </ol>
+            <p>Point the plugin at your observation folder and press <b>Run Pipeline</b>.
+            Folder layout and telescope model are auto-detected.</p>
+            <table cellspacing="0" cellpadding="2" width="100%">
+              <tr><td width="30%"><b>Organised</b></td><td><code>darks/</code> + <code>lights/</code></td></tr>
+              <tr><td><b>Native</b></td><td><code>01-images-initial/</code> + <code>*-dark.fits</code> in root</td></tr>
+              <tr><td><b>Flat</b></td><td>All FITS in one folder — auto-sorted by filename</td></tr>
+            </table>
+            <p>Output: <code>OBJECT_{suffixes}_{HHMM}.fit</code> in the working directory.</p>
             """
         ))
 
@@ -1842,22 +2131,16 @@ class VesperaProGUI(QDialog):
             "Stacking Methods",
             """
             <table cellspacing="0" cellpadding="3" width="100%">
-              <tr><td width="38%" valign="top"><b>Bayer Drizzle (Recommended)</b></td>
-                  <td>Gaussian kernel + area interp. Best for 10–15° field rotation.
-                      scale=1.0, pixfrac=1.0.</td></tr>
-              <tr><td valign="top"><b>Bayer Drizzle (Square)</b></td>
-                  <td>Flux-preserving square kernel. Preferred for photometry.
-                      scale=1.0, pixfrac=1.0.</td></tr>
-              <tr><td valign="top"><b>Bayer Drizzle (Nearest)</b></td>
-                  <td>Nearest-neighbour interpolation — no CFA-boundary artifacts.
-                      Use if checkerboard patterns appear.</td></tr>
-              <tr><td valign="top"><b>Standard Registration</b></td>
-                  <td>Debayer-then-register, no drizzle. Fast; suitable for sessions
-                      under 30 min with &lt;5° total field rotation.</td></tr>
+              <tr><td width="38%" valign="top"><b>Drizzle Gaussian</b></td>
+                  <td>Best for 10–15° field rotation. Default choice.</td></tr>
+              <tr><td valign="top"><b>Drizzle Square</b></td>
+                  <td>Flux-preserving. Preferred for photometry.</td></tr>
+              <tr><td valign="top"><b>Drizzle Nearest</b></td>
+                  <td>No interpolation artifacts. Use if checkerboard patterns appear.</td></tr>
+              <tr><td valign="top"><b>Standard</b></td>
+                  <td>No drizzle. Fast. Good for &lt;30 min / &lt;5° rotation.</td></tr>
               <tr><td valign="top"><b>Drizzle 2× Upscale</b></td>
-                  <td>7072×7072 px output (square kernel only). Requires 50+ well-dithered
-                      frames. BGE and 2-Pass Registration are disabled automatically.
-                      Plate-solving uses 2× effective focal length (500 mm).</td></tr>
+                  <td>2× native resolution. Needs 50+ well-dithered frames. BGE and 2-Pass disabled.</td></tr>
             </table>
             """
         ))
@@ -1866,74 +2149,25 @@ class VesperaProGUI(QDialog):
             "Options",
             """
             <table cellspacing="0" cellpadding="3" width="100%">
-              <tr><td width="38%" valign="top"><b>Background Extraction</b></td>
-                  <td>Linear background subtraction on calibrated debayered frames,
-                      before registration (40 samples). Reduces gradients from light
-                      pollution or uneven illumination.<br>
-                      <i>⚠ Incompatible with all Drizzle methods — drizzle requires
-                      CFA input. Automatically disabled when a Drizzle method is
-                      selected.</i></td></tr>
+              <tr><td width="38%" valign="top"><b>BGE</b></td>
+                  <td>Background subtraction before registration. Standard only — incompatible with Drizzle.</td></tr>
               <tr><td valign="top"><b>2-Pass Registration</b></td>
-                  <td>Second alignment pass with <code>-framing=max</code>. Improves
-                      results for sessions with significant field rotation. Needs ≥50
-                      frames (or ≥50 frames per chunk in batch mode).</td></tr>
-              <tr><td valign="top"><b>RICE 16 Compression</b></td>
-                  <td>Lossless Rice 16-bit compression on calibrated and registered
-                      intermediates. Reduces disk I/O during long sessions.
-                      Automatically disabled before the final stack step.</td></tr>
+                  <td>Second alignment pass for sessions with significant field rotation. Needs ≥50 frames.</td></tr>
+              <tr><td valign="top"><b>RICE 16</b></td>
+                  <td>Lossless compression on intermediates. Disabled automatically before stacking.</td></tr>
               <tr><td valign="top"><b>Feathering</b></td>
-                  <td>Soft edge blend (0–50 px) to hide hard seams at stack boundaries.
-                      10–20 px is a good starting point. Not applied to individual
-                      batch-chunk stacks, only to the pipeline result.</td></tr>
-              <tr><td valign="top"><b>Batch Processing</b></td>
-                  <td>Stacks in N-frame chunks then combines results in a final stack.
-                      Reduces peak disk usage. Min recommended: 20 frames/chunk;
-                      2-Pass needs ≥50 frames/chunk.<br>
-                      <i>Note: the final combine uses fixed σ 3.0/3.5 regardless of sky
-                      quality setting — chunk outputs are pre-stacked and smooth, so
-                      sky-quality sigmas would risk rejecting valid chunks.</i></td></tr>
+                  <td>Soft edge blend 0–50 px. Applied to final result only, not batch chunks.</td></tr>
+              <tr><td valign="top"><b>Batch</b></td>
+                  <td>Stack in N-frame chunks. Min 20 frames. Final combine uses fixed σ 3/3.</td></tr>
               <tr><td valign="top"><b>SPCC</b></td>
-                  <td>Photometric colour calibration against Gaia DR3. Plate-solves first
-                      using the DSO name from the FITS <code>OBJECT</code> header and
-                      SIMBAD coordinates. Requires an active internet connection.
-                      Filter options: <i>No Filter</i>, <i>Dual Band Ha/Oiii</i> (narrowband,
-                      12 nm), <i>City Light Pollution</i> (Vaonis CLS profile).</td></tr>
+                  <td>Photometric colour calibration via Gaia DR3. Requires internet + OBJECT FITS header.</td></tr>
               <tr><td valign="top"><b>Auto-Stretch</b></td>
-                  <td>Linked MTF stretch (σ −2.8, background 0.25).
-                      ⚠ Non-reversible — written into the saved FITS. Disable if you
-                      plan further linear processing.</td></tr>
-              <tr><td valign="top"><b>Clean Temp Files</b></td>
-                  <td>Deletes <code>process/</code>, <code>masters/</code>, and
-                      <code>final_stack/</code> after completion.
-                      ⚠ Leave off until you have verified the result.</td></tr>
+                  <td>MTF stretch σ −2.8 / bg 0.25. ⚠ Irreversible — disable for linear workflows.</td></tr>
+              <tr><td valign="top"><b>Clean Temp</b></td>
+                  <td>Deletes <code>process/</code> <code>masters/</code> <code>final_stack/</code>. Verify result first.</td></tr>
             </table>
+            <p style="color:#556688; margin-top:8px;">© G. Trainar (2026) — MIT License</p>
             """
-        ))
-
-        container_layout.addWidget(make_section(
-            "Known Limitations",
-            """
-            <ul style="margin-left:14px; line-height:1.7em;">
-              <li>&lt;20 frames per chunk will likely cause registration or stacking failures.</li>
-              <li>2-Pass registration needs ≥50 frames for a reliable reference frame.</li>
-              <li>Drizzle 2× Upscale disables BGE and 2-Pass (set automatically on method select).</li>
-              <li>Batch final stack uses fixed σ 3.0/3.5 (intentional) — sky quality sigma
-                  values apply to individual chunk stacks only.</li>
-              <li>SPCC requires an active internet connection (Gaia DR3 + SIMBAD).
-                  Plate-solving will be skipped silently if the FITS <code>OBJECT</code>
-                  header is absent or SIMBAD cannot resolve the target.</li>
-              <li>Auto-Stretch is irreversible in the saved file — disable for linear workflows.</li>
-              <li>Flat-directory auto-organisation matches darks by filename pattern only
-                  (<code>*dark*</code>). Rename ambiguous files before running.</li>
-            </ul>
-            """
-        ))
-
-        container_layout.addWidget(make_section(
-            "Credits",
-            """<p>Based on Siril's <code>OSC_Preprocessing_BayerDrizzle.ssf</code>.<br>
-            Optimised for Vaonis Vespera II and Vespera Pro.<br>
-            © G. Trainar (2026) — MIT License.</p>"""
         ))
 
         container_layout.addStretch()
@@ -1951,25 +2185,42 @@ class VesperaProGUI(QDialog):
             )
 
     def _on_stack_changed(self, name: str) -> None:
-        """Update description when stacking method changes."""
+        """Update description and enforce constraints when the user changes stacking method."""
         if name in STACKING_METHODS:
             self.lbl_stack_desc.setText(STACKING_METHODS[name]["description"])
 
-        if STACKING_METHODS.get(name, {}).get("use_drizzle"):
-            disabled = []
+        disabled = []
+        cfg = STACKING_METHODS.get(name, {})
+
+        if not cfg.get("use_drizzle"):
             if self.chk_bg_extract.isChecked():
                 self.chk_bg_extract.setChecked(False)
                 disabled.append("BGE")
-            if name == "Drizzle 2x Upscale":
-                if self.chk_two_pass.isChecked():
-                    self.chk_two_pass.setChecked(False)
-                    disabled.append("2-Pass Registration")
-            if disabled:
-                self._log(
-                    f"Drizzle: {' and '.join(disabled)} disabled "
-                    f"(incompatible — drizzle requires CFA input).",
-                    LogColor.SALMON,
-                )
+
+        if cfg.get("drizzle_scale", 1.0) > 1.0:
+            if self.chk_two_pass.isChecked():
+                self.chk_two_pass.setChecked(False)
+                disabled.append("2-Pass Registration")
+
+        if disabled:
+            label = "Standard Registration" if not cfg.get("use_drizzle") else name
+            reason = "debayers CFA input" if not cfg.get("use_drizzle") else "incompatible with upscaled drizzle"
+            self._log(
+                f"{label}: {' and '.join(disabled)} disabled ({reason}).",
+                LogColor.SALMON,
+            )
+
+    def _apply_drizzle_constraints(self, name: str) -> None:
+        """Silently enforce method checkbox constraints during settings load."""
+        cfg = STACKING_METHODS.get(name, {})
+
+        if not cfg.get("use_drizzle"):
+            if self.chk_bg_extract.isChecked():
+                self.chk_bg_extract.setChecked(False)
+
+        if cfg.get("drizzle_scale", 1.0) > 1.0:
+            if self.chk_two_pass.isChecked():
+                self.chk_two_pass.setChecked(False)
 
     def _load_settings(self) -> None:
         """Load saved settings from file."""
@@ -1986,7 +2237,9 @@ class VesperaProGUI(QDialog):
         def g_int(key, default): return int(data.get(key, default))
 
         self.combo_sky.setCurrentText(g_str("sky_quality", "Bortle 4-5 (Rural)"))
+        self.combo_stack.blockSignals(True)
         self.combo_stack.setCurrentText(g_str("stacking_method", "Bayer Drizzle (Recommended)"))
+        self.combo_stack.blockSignals(False)
         self.chk_bg_extract.setChecked(g_bool("bge", False))
         self.feather_slider.setValue(g_int("feather_px", 15))
         self.chk_feather.setChecked(g_bool("feather_enabled", False))
@@ -1997,9 +2250,11 @@ class VesperaProGUI(QDialog):
         self.spin_batch_size.setValue(g_int("batch_size", 20))
         self.spcc_cb.setChecked(g_bool("spcc", False))
         self.autostretch_cb.setChecked(g_bool("autostretch", True))
+        self.autocrop_cb.setChecked(g_bool("autocrop", False))
+        self.denoise_cb.setChecked(g_bool("denoise", False))
         self.spcc_filter_combo.setCurrentText(g_str("spcc_filter", "No Filter"))
         self._on_sky_changed(self.combo_sky.currentText())
-        self._on_stack_changed(self.combo_stack.currentText())
+        self._apply_drizzle_constraints(self.combo_stack.currentText())
 
     def _save_settings(self) -> None:
         """Save current settings to file."""
@@ -2016,6 +2271,8 @@ class VesperaProGUI(QDialog):
             "batch_size": self.spin_batch_size.value(),
             "spcc": self.spcc_cb.isChecked(),
             "autostretch": self.autostretch_cb.isChecked(),
+            "autocrop": self.autocrop_cb.isChecked(),
+            "denoise": self.denoise_cb.isChecked(),
             "spcc_filter": self.spcc_filter_combo.currentText(),
         }
         try:
@@ -2093,10 +2350,10 @@ class VesperaProGUI(QDialog):
         """Update frame count label with appropriate styling."""
         if count > 0:
             label.setText(f"✓ {kind}: {count}")
-            label.setStyleSheet("color: #55aa77; font-size: 9pt; font-family: monospace;")
+            label.setStyleSheet("color: #55aa77; font-size: 9pt; font-family: 'Menlo', 'Courier New';")
         else:
             label.setText(f"✗ {kind}: not found")
-            label.setStyleSheet("color: #aa4444; font-size: 9pt; font-family: monospace;")
+            label.setStyleSheet("color: #aa4444; font-size: 9pt; font-family: 'Menlo', 'Courier New';")
 
     def _detect_native_structure(self, workdir: str) -> Optional[Dict[str, Any]]:
         """Detect native Vespera folder structure."""
@@ -2163,6 +2420,8 @@ class VesperaProGUI(QDialog):
             "batch_size": self.spin_batch_size.value(),
             "spcc": self.spcc_cb.isChecked(),
             "autostretch": self.autostretch_cb.isChecked(),
+            "autocrop": self.autocrop_cb.isChecked(),
+            "denoise": self.denoise_cb.isChecked(),
             "focal_length_mm": 250.0,
             "pixel_size_um": 2.9,
             "spcc_sensor": "Sony IMX585",
