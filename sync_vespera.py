@@ -84,7 +84,11 @@ class CLIProgressTracker:
         
         # Calculate per‑file average speed using cumulative bytes and elapsed time since file start
         elapsed_file = time.time() - (self.current_file_start or time.time())
-        speed = bytes_downloaded / elapsed_file if elapsed_file > 0 else 0
+        # Only calculate speed if enough time has passed (minimum 0.5 seconds)
+        if elapsed_file < 0.5:
+            speed = 0
+        else:
+            speed = bytes_downloaded / elapsed_file if elapsed_file > 0 else 0
         self.last_bytes_downloaded = bytes_downloaded
         speed_str = f"{speed/1024:.1f} KB/s" if speed > 0 else "Calculating..."
         
